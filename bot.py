@@ -12,8 +12,9 @@ FEEDS = {
     "TechCrunch AI": "https://techcrunch.com/category/artificial-intelligence/feed/",
 }
 
-# Keep this conservative: X's current standard post limit is 280 Unicode code points.
 MAX_POST_LENGTH = 280
+TARGET_POST_LENGTH = 240
+GEMINI_MODEL = "gemini-3.6-flash"
 
 
 def collect_candidates(limit_per_feed=8):
@@ -21,21 +22,18 @@ def collect_candidates(limit_per_feed=8):
     for source, url in FEEDS.items():
         feed = feedparser.parse(url)
         for entry in feed.entries[:limit_per_feed]:
-            candidates.append(
-                {
-                    "source": source,
-                    "title": entry.get("title", "").strip(),
-                    "url": entry.get("link", "").strip(),
-                    "summary": re.sub(r"<[^>]+>", " ", entry.get("summary", ""))[:800].strip(),
-                }
-            )
+            candidates.append({
+                "source": source,
+                "title": entry.get("title", "").strip(),
+                "url": entry.get("link", "").strip(),
+                "summary": re.sub(r"<[^>]+>", " ", entry.get("summary", ""))[:800].strip(),
+            })
     return candidates
 
 
 def clean_post(post: str) -> str:
     post = post.strip().strip('"')
-    post = re.sub(r"\s+", " ", post)
-    return post
+    return re.sub(r"\s+", " ", post)
 
 
 def validate_post(post: str) -> list[str]:
@@ -48,17 +46,10 @@ def validate_post(post: str) -> list[str]:
         problems.append("contains_url")
     if post.startswith("#") and post.count("#") > 1:
         problems.append("hashtag_heavy")
-    # Common signs of canned AI/social copy. These are heuristics, not an AI detector.
     canned = [
-        "in today's rapidly evolving",
-        "game-changer",
-        "revolutionizing",
-        "unlock the power",
-        "exciting times",
-        "let that sink in",
-        "the future is here",
-        "here's the thing",
-        "it's worth noting",
+        "in today's rapidly evolving", "game-changer", "revolutionizing",
+        "unlock the power", "exciting times", "let that sink in",
+        "the future is here", "here's the thing", "it's worth noting",
     ]
     lower = post.lower()
     if any(phrase in lower for phrase in canned):
@@ -70,47 +61,37 @@ def choose_and_write(candidates):
     api_key = os.environ["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key)
     prompt = f"""
-You are the editorial brain for a personal X account focused on AI, software development,
+You are the editorial brain for a personal X account about AI, software development,
 developer tools, startups and interesting technology.
 
 Today's candidate stories:
 {json.dumps(candidates, ensure_ascii=False, indent=2)}
 
-Pick ONE topic that is genuinely interesting right now. Prefer a topic with an active
-conversation, disagreement, surprising development, or relatable developer experience.
-Do NOT just pick the biggest headline.
+Pick ONE topic that is genuinely interesting right now. Prefer active conversations,
+disagreement, surprising developments, or relatable developer experiences. Do not merely
+rewrite a headline.
 
-Write ONE funny, sharp, human-sounding X post. It should feel like a smart developer
-made an observation and couldn't resist posting it. Humor can be dry, playful, sarcastic,
-or lightly self-deprecating when appropriate. Do not force a joke if the topic doesn't
-support one.
+Write ONE funny, sharp, natural X post. It should sound like a smart developer noticed
+something funny or absurd and decided to post it. Humor may be dry, playful, sarcastic,
+or lightly self-deprecating. Never force a joke.
 
-STRICT STYLE:
-- Maximum 240 characters, leaving safety margin under X's 280-character standard limit.
-- Plain text; no URL.
-- No thread, no "1/", no title.
-- No generic motivational language.
-- No corporate/marketing tone.
-- Avoid phrases such as "game-changer", "revolutionizing", "exciting times",
-  "in today's rapidly evolving", "unlock the power", "let that sink in", and similar AI copy.
-- No fake personal experiences or claims.
-- No engagement bait like "Agree?", "Thoughts?", or "Who's with me?".
-- Use hashtags only if essential; preferably none.
-- Emojis are optional and rare.
-- Be specific rather than vague.
-- Don't manufacture a controversy.
+STRICT RULES:
+- Maximum 240 characters; X's standard post limit is 280 characters.
+- Plain text and no URL.
+- No thread, title, or numbered list.
+- No corporate/marketing tone or generic motivational language.
+- Avoid canned AI phrases such as game-changer, revolutionizing, exciting times,
+  today's rapidly evolving, unlock the power, let that sink in, etc.
+- No fake personal experiences or invented facts.
+- No engagement bait such as Agree?, Thoughts?, or Who's with me?
+- Prefer zero hashtags and rare/no emojis.
+- Be specific, concise, conversational, and original.
+- Do not manufacture controversy.
 
 Return ONLY valid JSON:
-{{
-  "topic": "...",
-  "reason": "...",
-  "post": "..."
-}}
+{{"topic":"...","reason":"...","post":"..."}}
 """
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
+    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     text = response.text.strip()
     if text.startswith("```"):
         text = text.strip("`").replace("json\n", "", 1).strip()
