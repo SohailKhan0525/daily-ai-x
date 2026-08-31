@@ -36,6 +36,8 @@ CANNED_PHRASES = [
     "as we navigate",
     "this highlights the importance",
     "transformative",
+    "seamlessly",
+    "delve into",
 ]
 
 
@@ -77,42 +79,60 @@ def gemini_generate(candidates, history):
     api_key = os.environ["GEMINI_API_KEY"]
     recent_history = history[-20:]
 
-    prompt = f"""You write one natural X post for a personal account about AI, software, developer tools, startups and technology.
+    prompt = f"""You write ONE short, funny, natural X post for a personal tech/developer account.
 
-Here are fresh candidate stories collected from multiple sources:
+Fresh candidate stories:
 {json.dumps(candidates, ensure_ascii=False, indent=2)}
 
 Recent posts already used:
 {json.dumps(recent_history, ensure_ascii=False)}
 
-Your job:
-1. Choose the strongest CURRENT topic, not merely the first headline.
-2. Prefer stories with freshness, broad developer relevance, surprise, practical usefulness, or strong meme/joke potential.
-3. Give extra weight when a topic appears across multiple sources or is clearly prominent in the feeds.
-4. Ignore stale, duplicated, promotional, or low-signal stories.
-5. Write an original observation/joke about the topic. Do not rewrite the headline.
+Choose the strongest CURRENT tech topic. Prioritize:
+- genuinely fresh stories
+- things developers are likely to care about
+- topics with surprise, irony, absurdity, or meme potential
+- stories that appear prominent across sources
+- practical developer/tooling topics when they are timely
 
-Style:
-- Casual developer voice.
-- Dry humor, playful sarcasm, clever understatement, or relatable developer humor.
-- Short and punchy.
-- It should sound like something a real person would casually post.
-- Don't force a joke if the topic doesn't support one.
+Avoid:
+- stale or low-signal stories
+- duplicated stories
+- political outrage bait
+- medical/legal/financial claims unless the story is directly about a technology product or developer tool
+- topics where the candidate text does not provide enough factual support
 
-Hard rules:
-- Maximum {TARGET_POST_LENGTH} characters (well below X's 280-character post limit).
+Then write an original observation or joke. Do NOT rewrite the headline.
+
+VOICE:
+- sounds like a real developer casually posting
+- dry humor, understated sarcasm, clever observation, or relatable dev humor
+- punchy and specific
+- confident but not corporate
+- no forced meme language
+- no fake enthusiasm
+
+FACTUALITY / AUTHENTICITY:
+- Only state facts supported by the supplied candidate stories.
+- Never invent facts, numbers, quotes, product capabilities, launches, or events.
+- NEVER invent a personal experience, action, conversation, test, purchase, or opinion for the account owner.
+- Avoid fake first-person setups such as "I asked...", "I tried...", "I spent...", "my..." unless that exact experience is explicitly present in the candidate data.
+- Do not claim to have used a product.
+- Do not say "we" unless it is clearly referring to developers/users generally.
+- Do not mention Gemini, ChatGPT, or being an AI merely to explain how the post was generated.
+
+HARD POST RULES:
+- Maximum {TARGET_POST_LENGTH} characters.
 - Plain text only.
-- No URL, no hashtags, no emojis unless genuinely useful.
-- No thread, title, list, or bullet points.
-- No marketing/corporate tone.
-- Never claim personal experience you do not have.
-- Never invent facts, numbers, quotes, launches, or capabilities.
-- Don't simply paraphrase the source headline.
-- Don't use engagement bait such as "Agree?", "Thoughts?", or "Who else?".
-- Don't manufacture controversy.
-- Avoid generic AI-sounding/corporate phrases including: {", ".join(CANNED_PHRASES)}.
-- Do not mention that you are an AI or that the post was generated.
-- Avoid repetitive sentence patterns and obvious template openings.
+- No URL.
+- No hashtags.
+- No emojis unless genuinely necessary for the joke.
+- No thread, title, list, bullets, or quote formatting.
+- No engagement bait: no "Agree?", "Thoughts?", "Who else?", etc.
+- No manufactured controversy.
+- No marketing/corporate language.
+- Avoid generic AI-sounding phrases including: {", ".join(CANNED_PHRASES)}.
+- Do not mention that the post was generated.
+- Avoid repetitive template openings.
 
 Return ONLY valid JSON:
 {{"topic":"...","reason":"...","post":"..."}}
@@ -196,7 +216,6 @@ def main():
     history = load_history()
     last_error = None
 
-    # Retry a couple of times so one awkward Gemini response doesn't stop the day.
     for attempt in range(3):
         try:
             result = gemini_generate(candidates, history)
@@ -205,7 +224,9 @@ def main():
         except (ValueError, json.JSONDecodeError, KeyError) as exc:
             last_error = exc
             if attempt == 2:
-                raise RuntimeError(f"Could not produce a valid post after 3 attempts: {exc}") from exc
+                raise RuntimeError(
+                    f"Could not produce a valid post after 3 attempts: {exc}"
+                ) from exc
     else:
         raise RuntimeError(f"Could not produce a valid post: {last_error}")
 
