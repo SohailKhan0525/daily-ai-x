@@ -113,12 +113,15 @@ VOICE:
 
 FACTUALITY / AUTHENTICITY:
 - Only state facts supported by the supplied candidate stories.
-- Never invent facts, numbers, quotes, product capabilities, launches, or events.
+- Never invent facts, numbers, prices, quotes, product capabilities, launches, or events.
 - NEVER invent a personal experience, action, conversation, test, purchase, or opinion for the account owner.
-- Avoid fake first-person setups such as "I asked...", "I tried...", "I spent...", "my..." unless that exact experience is explicitly present in the candidate data.
+- Do not use first-person claims such as "I", "I'm", "I've", "my", "me", or "mine".
+- Do not invent dollar amounts, prices, counts, measurements, or other specific numbers.
 - Do not claim to have used a product.
-- Do not say "we" unless it is clearly referring to developers/users generally.
+- Do not say "we" unless it clearly refers to developers/users generally.
 - Do not mention Gemini, ChatGPT, or being an AI merely to explain how the post was generated.
+
+IMPORTANT: If a joke requires inventing a scenario, personal anecdote, price, number, or specific detail that is not in the source material, abandon that joke and write a simpler observation based only on the supplied facts.
 
 HARD POST RULES:
 - Maximum {TARGET_POST_LENGTH} characters.
@@ -173,6 +176,10 @@ def validate(post, history):
         raise ValueError("URL detected")
     if any(phrase in post.lower() for phrase in CANNED_PHRASES):
         raise ValueError("Canned/AI-sounding phrase detected")
+    if re.search(r"\b(i|i'm|i’ve|i've|my|me|mine)\b", post.lower()):
+        raise ValueError("First-person/personal claim detected")
+    if re.search(r"(?:\$|€|£)\s*\d|\b\d+(?:\.\d+)?\s*(?:dollars|bucks|million|billion|thousand)\b", post.lower()):
+        raise ValueError("Unverified number or price detected")
     if post in history:
         raise ValueError("Duplicate post")
 
