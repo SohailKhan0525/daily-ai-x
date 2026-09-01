@@ -61,6 +61,14 @@ TREND_LANES = {
     ],
 }
 
+TREND_ONLY_CLAIM_PATTERNS = [
+    r"\b(?:terminal|repo|repository|codebase|filesystem|shell)\s+(?:access|permissions?)\b",
+    r"\baccess\s+to\s+(?:the\s+)?(?:terminal|repo|repository|codebase|filesystem|shell)\b",
+    r"\b(?:run|execute|fix|refactor|edit|modify|change|deploy|ship|commit|push)\b",
+    r"\b(?:can|could|will|lets|let's)\s+(?:run|execute|fix|refactor|edit|modify|change|deploy|ship|commit|push)\b",
+    r"\b(?:autonomous|agentic)\s+(?:model|agent|system)\s+(?:can|could|will)\b",
+]
+
 UNSUPPORTED_CLAIM_PATTERNS = [
     r"\bmost effective\b", r"\bmost successful\b", r"\bmost popular\b",
     r"\bbest ever\b", r"\bworst ever\b", r"\bbiggest ever\b", r"\bfirst ever\b",
@@ -210,6 +218,7 @@ RECENT POSTS:
 
 Rules:
 - Choose one exact topic from the supplied X trends when a relevant one exists.
+- If the chosen X trend has no matching RSS evidence, write a META-ONLY observation about the fact that the topic is trending. Do not claim what any product, model, agent, company, person, or tool can do.
 - RSS can provide factual context only; do not combine unrelated stories.
 - Every factual statement in the post must be directly supported by the source material.
 - Do NOT invent product capabilities, access, permissions, actions, tests, results, motives, comparisons, dates, numbers, prices, rankings, anecdotes, or technical details.
@@ -226,7 +235,7 @@ Rules:
 - Avoid these phrases: {", ".join(CANNED_PHRASES)}
 
 IMPORTANT EXAMPLE:
-If the source says only "#AgenticAI is trending", a valid joke can say that the internet is currently very interested in agentic AI. It is NOT valid to claim that an agentic model has terminal access, can fix a linter, or can refactor a repository unless the source explicitly says that.
+If the source says only "#AgenticAI is trending", a valid joke can say that agentic AI is suddenly all over the timeline. It is NOT valid to claim that an agentic model has terminal access, can fix a linter, or can refactor a repository unless an RSS source explicitly supports that claim.
 
 Return JSON with topic, reason, and post only."""
     return _gemini_request(prompt)
@@ -280,6 +289,26 @@ def _gemini_request_verify(prompt):
     return json.loads(text)
 
 
+def _topic_has_rss_support(topic, candidates):
+    topic_words = _meaningful_words(topic.replace("#", " "))
+    if not topic_words:
+        return False
+    for item in candidates:
+        source_words = _meaningful_words(
+            f"{item.get('title', '')} {item.get('summary', '')}"
+        )
+        if len(topic_words & source_words) >= min(2, len(topic_words)):
+            return True
+    return False
+
+
+def _trend_only_post_is_safe(post):
+    return not any(
+        re.search(pattern, post, re.I)
+        for pattern in TREND_ONLY_CLAIM_PATTERNS
+    )
+
+
 def _meaningful_words(text):
     stop = {
         "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
@@ -321,6 +350,15 @@ def validate(result, history, filtered_trends, candidates):
     ] + [item["title"] for item in candidates]
     if topic and not any(topic.casefold() == candidate.casefold() for candidate in allowed_topics):
         raise ValueError("Topic is not present in supplied sources")
+
+    trend_names = {
+        item["name"].casefold()
+        for items in filtered_trends.values()
+        for item in items
+    }
+    if topic.casefold() in trend_names and not _topic_has_rss_support(topic, candidates):
+        if not _trend_only_post_is_safe(post):
+            raise ValueError("Trend-only post contains an unsupported capability/action claim")
 
     # Require overlap with the selected topic/source, not merely generic lane words.
     source_words = _meaningful_words(" ".join(allowed_topics))
