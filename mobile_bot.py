@@ -30,7 +30,6 @@ CANNED_PHRASES = [
     "seamlessly", "delve into",
 ]
 
-# These are the only content lanes allowed into the writer.
 TREND_LANES = {
     "ai": [
         "ai", "artificial intelligence", "chatgpt", "openai", "gemini", "claude",
@@ -62,8 +61,6 @@ TREND_LANES = {
     ],
 }
 
-# Claims that are very easy for a model to invent and that should not pass the gate
-# unless they are explicitly present in the supplied source material.
 UNSUPPORTED_CLAIM_PATTERNS = [
     r"\bmost effective\b", r"\bmost successful\b", r"\bmost popular\b",
     r"\bbest ever\b", r"\bworst ever\b", r"\bbiggest ever\b", r"\bfirst ever\b",
@@ -82,10 +79,7 @@ def _trend_score(name, keywords):
 def filter_x_trends(x_trends, max_per_lane=8):
     filtered = {lane: [] for lane in TREND_LANES}
     seen = set()
-
-    # X's dedicated sports feed gets priority for sports classification.
-    ordered_categories = ["sports", "for-you", "news", "trending"]
-    for source_category in ordered_categories:
+    for source_category in ["sports", "for-you", "news", "trending"]:
         for raw_name in x_trends.get(source_category, []):
             name = str(raw_name).strip()
             if not name:
@@ -93,7 +87,6 @@ def filter_x_trends(x_trends, max_per_lane=8):
             key = name.casefold()
             if key in seen:
                 continue
-
             matches = []
             for lane, keywords in TREND_LANES.items():
                 score = _trend_score(name, keywords)
@@ -101,14 +94,11 @@ def filter_x_trends(x_trends, max_per_lane=8):
                     matches.append((score, lane))
             if not matches:
                 continue
-
             score, lane = max(matches, key=lambda item: item[0])
             if score == 1 and source_category != "sports":
                 continue
-
             filtered[lane].append({"name": name, "score": score, "source": source_category})
             seen.add(key)
-
     for lane in filtered:
         filtered[lane].sort(key=lambda item: item["score"], reverse=True)
         filtered[lane] = filtered[lane][:max_per_lane]
@@ -121,7 +111,6 @@ async def collect_x_trends(count=30):
         "auth_token": os.environ["X_AUTH_TOKEN"],
         "ct0": os.environ["X_CT0"],
     })
-
     result = {}
     for category in ["trending", "for-you", "news", "sports"]:
         try:
@@ -165,89 +154,130 @@ def collect_candidates(limit_per_feed=8):
     return candidates
 
 
-def gemini_generate(candidates, history, filtered_trends):
+def _source_text(candidates, filtered_trends):
+    trend_lines = []
+    for lane, items in filtered_trends.items():
+        for item in items:
+            trend_lines.append(f"X trend [{lane}]: {item['name']}")
+    feed_lines = []
+    for item in candidates:
+        feed_lines.append(f"RSS [{item['source']}]: {item['title']} — {item['summary']}")
+    return "\n".join(trend_lines + feed_lines)
+
+
+def _gemini_request(prompt):
     api_key = os.environ["GEMINI_API_KEY"]
-    recent_history = history[-20:]
-    prompt = f"""Write ONE short, funny, natural X post for a personal tech/developer account.
-
-FILTERED LIVE X TRENDS:
-{json.dumps(filtered_trends, ensure_ascii=False, indent=2)}
-
-FRESH RSS CANDIDATES:
-{json.dumps(candidates, ensure_ascii=False, indent=2)}
-
-RECENT POSTS:
-{json.dumps(recent_history, ensure_ascii=False)}
-
-FOUR ALLOWED LANES:
-1. AI / AI tools / AI engineering
-2. Developers / programming / developer tools / IDEs
-3. Vibe coding / AI-assisted coding
-4. Sports — only when a live sports trend is genuinely interesting enough for a sharp developer-style observation
-
-SOURCE PRIORITY:
-- X trends are the primary signal for what is hot now.
-- If a relevant filtered X trend exists, choose one of those exact trend names as the topic.
-- RSS may only add factual context to that topic.
-- If no relevant X trend exists, use the strongest fresh RSS candidate.
-- Never force an unrelated popular trend into the account's niche.
-
-FACTUALITY IS A HARD CONSTRAINT:
-- Every factual claim must be directly supported by the supplied trend or RSS material.
-- Do not infer motives, rankings, historical significance, market impact, popularity, effectiveness, or outcomes unless the source explicitly says so.
-- Never invent numbers, prices, dates, quotes, product capabilities, launches, comparisons, anecdotes, tests, purchases, or personal experiences.
-- NEVER turn a weak fact into a strong claim. For example, do not turn "Google is removing Manifest V2" into claims about the "most effective marketing campaign" or "the biggest change in a decade".
-- Avoid unsupported superlatives and historical claims such as "best", "worst", "biggest", "most effective", "unprecedented", "in a decade", "ever", or "by far" unless those exact claims are explicitly supported by the supplied material.
-- If a joke needs an invented detail, abandon that joke and write a simpler observation using only supported facts.
-
-VOICE:
-- dry humor, understated sarcasm, clever observation, relatable dev humor
-- punchy, specific, casual, not corporate
-- do not merely rewrite the headline
-
-AVOID:
-- politics, celebrity gossip, generic world news, crypto/finance, medical/legal claims
-- unrelated entertainment, stale stories, duplicated stories
-- marketing/corporate language
-- engagement bait such as "Agree?", "Thoughts?", or "Who else?"
-- first-person/personal claims: I, I'm, I've, my, me, mine
-- mentioning Gemini, ChatGPT, or AI as the generator
-
-HARD POST RULES:
-- maximum {TARGET_POST_LENGTH} characters
-- plain text only
-- no URLs, hashtags, threads, bullets, or quote formatting
-- no fake enthusiasm
-- avoid these phrases: {", ".join(CANNED_PHRASES)}
-
-Return ONLY valid JSON:
-{{"topic":"...","reason":"...","post":"..."}}
-"""
-
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={api_key}"
     )
-    body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "response_schema": {
+                "type": "OBJECT",
+                "properties": {
+                    "topic": {"type": "STRING"},
+                    "reason": {"type": "STRING"},
+                    "post": {"type": "STRING"},
+                },
+                "required": ["topic", "reason", "post"],
+            },
+        },
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
     with urllib.request.urlopen(req, timeout=60) as response:
         payload = json.loads(response.read().decode("utf-8"))
-
     text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
-    if text.startswith("```"):
-        text = text.strip("`").replace("json\n", "", 1).strip()
     result = json.loads(text)
     result["post"] = re.sub(r"\s+", " ", result["post"].strip().strip('"'))
     return result
 
 
-def _evidence_terms(filtered_trends, candidates):
-    evidence = []
-    for lane_items in filtered_trends.values():
-        evidence.extend(item["name"] for item in lane_items)
-    evidence.extend(item["title"] for item in candidates)
-    evidence.extend(item["summary"] for item in candidates)
-    return " ".join(evidence).casefold()
+def gemini_generate(candidates, history, filtered_trends):
+    recent_history = history[-20:]
+    source_text = _source_text(candidates, filtered_trends)
+    prompt = f"""Write ONE short, funny, natural X post for a personal tech/developer account.
+
+SOURCE MATERIAL — the ONLY factual ground truth:
+{source_text}
+
+RECENT POSTS:
+{json.dumps(recent_history, ensure_ascii=False)}
+
+Rules:
+- Choose one exact topic from the supplied X trends when a relevant one exists.
+- RSS can provide factual context only; do not combine unrelated stories.
+- Every factual statement in the post must be directly supported by the source material.
+- Do NOT invent product capabilities, access, permissions, actions, tests, results, motives, comparisons, dates, numbers, prices, rankings, anecdotes, or technical details.
+- A trend name alone does NOT prove anything about what a product or model can do.
+- If the source only says a topic is trending, joke about the fact that it is trending; do not invent what the topic does.
+- Keep humor observational, not factual invention.
+- Never convert a weak source into a strong claim.
+- Avoid unsupported words such as best, worst, biggest, most effective, unprecedented, historic, massive, huge, ever, by far.
+- No first-person claims: I, I'm, I've, my, me, mine.
+- No politics, celebrity gossip, generic world news, crypto/finance, medical/legal claims, or unrelated entertainment.
+- No engagement bait.
+- No URLs, hashtags, bullets, quotes, or thread formatting.
+- Maximum {TARGET_POST_LENGTH} characters.
+- Avoid these phrases: {", ".join(CANNED_PHRASES)}
+
+IMPORTANT EXAMPLE:
+If the source says only "#AgenticAI is trending", a valid joke can say that the internet is currently very interested in agentic AI. It is NOT valid to claim that an agentic model has terminal access, can fix a linter, or can refactor a repository unless the source explicitly says that.
+
+Return JSON with topic, reason, and post only."""
+    return _gemini_request(prompt)
+
+
+def gemini_verify(result, candidates, filtered_trends):
+    source_text = _source_text(candidates, filtered_trends)
+    prompt = f"""Act as a strict factuality gate for an X post.
+
+SOURCE MATERIAL:
+{source_text}
+
+CANDIDATE POST:
+{result['post']}
+
+Return JSON only with exactly these fields:
+{{"ok": true/false, "reason": "short reason"}}
+
+Set ok=false if the post contains ANY factual claim that is not directly supported by the source material. Humor and opinions are allowed only when they do not smuggle in new factual claims. In particular, reject invented product/model capabilities, permissions, access, actions, tests, outcomes, numbers, rankings, motives, historical comparisons, or technical details. A topic merely being a trend does not establish what the topic or product can do."""
+    verified = _gemini_request_verify(prompt)
+    if not verified.get("ok"):
+        raise ValueError(f"Factuality gate rejected post: {verified.get('reason', 'unsupported claim')}")
+
+
+def _gemini_request_verify(prompt):
+    api_key = os.environ["GEMINI_API_KEY"]
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={api_key}"
+    )
+    body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "response_schema": {
+                "type": "OBJECT",
+                "properties": {
+                    "ok": {"type": "BOOLEAN"},
+                    "reason": {"type": "STRING"},
+                },
+                "required": ["ok", "reason"],
+            },
+        },
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=60) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
+    return json.loads(text)
 
 
 def _meaningful_words(text):
@@ -257,11 +287,15 @@ def _meaningful_words(text):
         "it", "its", "has", "have", "had", "as", "at", "by", "be", "been",
         "into", "than", "their", "they", "them", "will", "can", "just", "now",
     }
-    words = re.findall(r"[a-z0-9][a-z0-9'’-]*", text.casefold())
-    return {word for word in words if len(word) >= 4 and word not in stop}
+    return {
+        word for word in re.findall(r"[a-z0-9][a-z0-9'’-]*", text.casefold())
+        if len(word) >= 4 and word not in stop
+    }
 
 
-def validate(post, history, filtered_trends, candidates):
+def validate(result, history, filtered_trends, candidates):
+    post = result.get("post", "")
+    topic = str(result.get("topic", "")).strip()
     if not post:
         raise ValueError("Empty post")
     if len(post) > MAX_POST_LENGTH:
@@ -280,11 +314,18 @@ def validate(post, history, filtered_trends, candidates):
     if post in history:
         raise ValueError("Duplicate post")
 
-    # Require the generated post to retain at least one meaningful source term.
-    # This is a safety net against a totally unrelated model invention.
+    allowed_topics = [
+        item["name"]
+        for items in filtered_trends.values()
+        for item in items
+    ] + [item["title"] for item in candidates]
+    if topic and not any(topic.casefold() == candidate.casefold() for candidate in allowed_topics):
+        raise ValueError("Topic is not present in supplied sources")
+
+    # Require overlap with the selected topic/source, not merely generic lane words.
+    source_words = _meaningful_words(" ".join(allowed_topics))
     post_words = _meaningful_words(post)
-    evidence_words = _meaningful_words(_evidence_terms(filtered_trends, candidates))
-    if post_words and not (post_words & evidence_words):
+    if post_words and not (post_words & source_words):
         raise ValueError("Post has no meaningful overlap with supplied sources")
 
 
@@ -331,7 +372,8 @@ def main():
     for attempt in range(3):
         try:
             result = gemini_generate(candidates, history, filtered_trends)
-            validate(result["post"], history, filtered_trends, candidates)
+            validate(result, history, filtered_trends, candidates)
+            gemini_verify(result, candidates, filtered_trends)
             break
         except (ValueError, json.JSONDecodeError, KeyError) as exc:
             last_error = exc
