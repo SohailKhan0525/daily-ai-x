@@ -1,25 +1,37 @@
-name: Daily AI X Draft
+name: AI X Publisher
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 3 * * *'
+    # 8:00 PM IST = 14:30 UTC
+    - cron: '30 14 * * *'
+    # 12:00 AM IST = 18:30 UTC
+    - cron: '30 18 * * *'
 
 jobs:
-  draft:
+  publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      TZ: Asia/Kolkata
+      # Scheduled runs publish; manual runs stay dry unless explicitly changed.
+      POST_TO_X: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Generate draft
+
+      - name: Generate and publish
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python bot.py
+          X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
+          X_CT0: ${{ secrets.X_CT0 }}
+        run: python mobile_bot.py
