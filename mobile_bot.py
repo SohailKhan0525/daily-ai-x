@@ -23,25 +23,14 @@ TARGET_POST_LENGTH = 240
 HISTORY_FILE = os.path.expanduser("~/daily-ai-x-history.json")
 
 CANNED_PHRASES = [
-    "game-changer",
-    "game changer",
-    "revolutionizing",
-    "revolutionary",
-    "unlock the power",
-    "exciting times",
-    "let that sink in",
-    "the future is here",
-    "in today's rapidly evolving",
-    "in the rapidly evolving",
-    "it's worth noting",
-    "as we navigate",
-    "this highlights the importance",
-    "transformative",
-    "seamlessly",
-    "delve into",
+    "game-changer", "game changer", "revolutionizing", "revolutionary",
+    "unlock the power", "exciting times", "let that sink in", "the future is here",
+    "in today's rapidly evolving", "in the rapidly evolving", "it's worth noting",
+    "as we navigate", "this highlights the importance", "transformative",
+    "seamlessly", "delve into",
 ]
 
-# Only these four lanes are allowed to reach the writer.
+# These are the only content lanes allowed into the writer.
 TREND_LANES = {
     "ai": [
         "ai", "artificial intelligence", "chatgpt", "openai", "gemini", "claude",
@@ -73,22 +62,28 @@ TREND_LANES = {
     ],
 }
 
+# Claims that are very easy for a model to invent and that should not pass the gate
+# unless they are explicitly present in the supplied source material.
+UNSUPPORTED_CLAIM_PATTERNS = [
+    r"\bmost effective\b", r"\bmost successful\b", r"\bmost popular\b",
+    r"\bbest ever\b", r"\bworst ever\b", r"\bbiggest ever\b", r"\bfirst ever\b",
+    r"\bin a decade\b", r"\bin years\b", r"\bfor years\b", r"\bever\b",
+    r"\bthe biggest\b", r"\bthe best\b", r"\bthe worst\b", r"\bthe greatest\b",
+    r"\bunprecedented\b", r"\bhistoric\b", r"\bmassive\b", r"\bhuge\b",
+    r"\bclearly the\b", r"\bby far\b", r"\bnumber one\b", r"\bno one saw\b",
+]
+
 
 def _trend_score(name, keywords):
     text = name.casefold()
-    score = 0
-    for keyword in keywords:
-        if keyword in text:
-            score += 2 if " " in keyword else 1
-    return score
+    return sum(2 if " " in keyword else 1 for keyword in keywords if keyword in text)
 
 
 def filter_x_trends(x_trends, max_per_lane=8):
-    """Keep only relevant live X trends for the account's four content lanes."""
     filtered = {lane: [] for lane in TREND_LANES}
     seen = set()
 
-    # Prefer X's dedicated sports bucket when assigning sports trends.
+    # X's dedicated sports feed gets priority for sports classification.
     ordered_categories = ["sports", "for-you", "news", "trending"]
     for source_category in ordered_categories:
         for raw_name in x_trends.get(source_category, []):
@@ -104,43 +99,31 @@ def filter_x_trends(x_trends, max_per_lane=8):
                 score = _trend_score(name, keywords)
                 if score:
                     matches.append((score, lane))
-
             if not matches:
                 continue
 
-            # Assign a trend to its strongest lane only, avoiding noisy duplicates.
             score, lane = max(matches, key=lambda item: item[0])
-            # One-word generic matches such as "code", "model", or "win" are too noisy
-            # unless X's dedicated category gives us stronger context.
-            if score == 1 and source_category not in ("sports",):
+            if score == 1 and source_category != "sports":
                 continue
 
-            filtered[lane].append(
-                {"name": name, "score": score, "source": source_category}
-            )
+            filtered[lane].append({"name": name, "score": score, "source": source_category})
             seen.add(key)
 
     for lane in filtered:
         filtered[lane].sort(key=lambda item: item["score"], reverse=True)
         filtered[lane] = filtered[lane][:max_per_lane]
-
     return filtered
 
 
 async def collect_x_trends(count=30):
-    """Fetch live X trends from the authenticated session."""
     client = Client("en-US")
-    client.set_cookies(
-        {
-            "auth_token": os.environ["X_AUTH_TOKEN"],
-            "ct0": os.environ["X_CT0"],
-        }
-    )
+    client.set_cookies({
+        "auth_token": os.environ["X_AUTH_TOKEN"],
+        "ct0": os.environ["X_CT0"],
+    })
 
-    categories = ["trending", "for-you", "news", "sports"]
     result = {}
-
-    for category in categories:
+    for category in ["trending", "for-you", "news", "sports"]:
         try:
             trends = await client.get_trends(category, count=count, retry=False)
             names = []
@@ -153,14 +136,12 @@ async def collect_x_trends(count=30):
         except Exception as exc:
             print(f"X trends unavailable for {category}: {exc}")
             result[category] = []
-
     return result
 
 
 def collect_candidates(limit_per_feed=8):
     candidates = []
     seen_titles = set()
-
     for source, url in FEEDS.items():
         feed = feedparser.parse(url)
         for entry in feed.entries[:limit_per_feed]:
@@ -168,113 +149,76 @@ def collect_candidates(limit_per_feed=8):
             link = entry.get("link", "").strip()
             if not title:
                 continue
-
             key = re.sub(r"\W+", " ", title.lower()).strip()
             if key in seen_titles:
                 continue
             seen_titles.add(key)
-
             summary = re.sub(r"<[^>]+>", " ", entry.get("summary", ""))
             summary = re.sub(r"\s+", " ", summary).strip()[:800]
-            published = entry.get("published", entry.get("updated", ""))
-
-            candidates.append(
-                {
-                    "source": source,
-                    "title": title,
-                    "summary": summary,
-                    "published": published,
-                    "url": link,
-                }
-            )
-
+            candidates.append({
+                "source": source,
+                "title": title,
+                "summary": summary,
+                "published": entry.get("published", entry.get("updated", "")),
+                "url": link,
+            })
     return candidates
 
 
 def gemini_generate(candidates, history, filtered_trends):
     api_key = os.environ["GEMINI_API_KEY"]
     recent_history = history[-20:]
+    prompt = f"""Write ONE short, funny, natural X post for a personal tech/developer account.
 
-    prompt = f"""You write ONE short, funny, natural X post for a personal tech/developer account.
-
-FILTERED LIVE X TRENDS RIGHT NOW:
+FILTERED LIVE X TRENDS:
 {json.dumps(filtered_trends, ensure_ascii=False, indent=2)}
 
-Fresh tech/developer candidate stories:
+FRESH RSS CANDIDATES:
 {json.dumps(candidates, ensure_ascii=False, indent=2)}
 
-Recent posts already used:
+RECENT POSTS:
 {json.dumps(recent_history, ensure_ascii=False)}
 
-CONTENT LANES — stay inside these:
+FOUR ALLOWED LANES:
 1. AI / AI tools / AI engineering
 2. Developers / programming / developer tools / IDEs
 3. Vibe coding / AI-assisted coding
-4. Sports — only when the live sports trend is genuinely interesting enough to make a sharp developer-style observation
+4. Sports — only when a live sports trend is genuinely interesting enough for a sharp developer-style observation
 
-TREND-FIRST RULE:
-- The FILTERED LIVE X TRENDS are the primary signal for what is hot right now.
-- Prefer a relevant live X trend over an ordinary RSS story.
-- The trend must belong to one of the four lanes above.
-- You may use the supplied RSS stories only to add factual context to a relevant trend.
-- If the filtered X trends contain relevant options, choose the strongest current one.
-- If there are no relevant filtered X trends, choose the strongest fresh tech/developer RSS story instead.
-- Never force an unrelated trend into the account's niche.
-- Never use a trend merely because it is popular; relevance comes first.
+SOURCE PRIORITY:
+- X trends are the primary signal for what is hot now.
+- If a relevant filtered X trend exists, choose one of those exact trend names as the topic.
+- RSS may only add factual context to that topic.
+- If no relevant X trend exists, use the strongest fresh RSS candidate.
+- Never force an unrelated popular trend into the account's niche.
 
-Choose the strongest CURRENT topic. Prioritize:
-- genuinely fresh topics
-- things developers are likely to care about
-- surprise, irony, absurdity, or meme potential
-- practical developer/tooling topics when timely
-- a recognizable topic people are already discussing on X
-
-Avoid:
-- politics
-- celebrity gossip
-- generic world news
-- crypto/finance
-- medical/legal claims
-- unrelated entertainment
-- stale or low-signal stories
-- duplicated stories
-- religious or political hashtags unless the supplied trend is clearly a sports/AI/developer topic
-
-Then write an original observation or joke. Do NOT rewrite the headline or simply announce the trend.
+FACTUALITY IS A HARD CONSTRAINT:
+- Every factual claim must be directly supported by the supplied trend or RSS material.
+- Do not infer motives, rankings, historical significance, market impact, popularity, effectiveness, or outcomes unless the source explicitly says so.
+- Never invent numbers, prices, dates, quotes, product capabilities, launches, comparisons, anecdotes, tests, purchases, or personal experiences.
+- NEVER turn a weak fact into a strong claim. For example, do not turn "Google is removing Manifest V2" into claims about the "most effective marketing campaign" or "the biggest change in a decade".
+- Avoid unsupported superlatives and historical claims such as "best", "worst", "biggest", "most effective", "unprecedented", "in a decade", "ever", or "by far" unless those exact claims are explicitly supported by the supplied material.
+- If a joke needs an invented detail, abandon that joke and write a simpler observation using only supported facts.
 
 VOICE:
-- sounds like a real developer casually posting
-- dry humor, understated sarcasm, clever observation, or relatable dev humor
-- punchy and specific
-- confident but not corporate
-- no forced meme language
-- no fake enthusiasm
+- dry humor, understated sarcasm, clever observation, relatable dev humor
+- punchy, specific, casual, not corporate
+- do not merely rewrite the headline
 
-FACTUALITY / AUTHENTICITY:
-- Only state facts supported by the supplied X trends or candidate stories.
-- Never invent facts, numbers, prices, quotes, product capabilities, launches, or events.
-- NEVER invent a personal experience, action, conversation, test, purchase, or opinion for the account owner.
-- Do not use first-person claims such as "I", "I'm", "I've", "my", "me", or "mine".
-- Do not invent dollar amounts, prices, counts, measurements, or other specific numbers.
-- Do not claim to have used a product.
-- Do not say "we" unless it clearly refers to developers/users generally.
-- Do not mention Gemini, ChatGPT, or being an AI merely to explain how the post was generated.
-
-IMPORTANT: If a joke requires inventing a scenario, personal anecdote, price, number, or specific detail that is not in the source material, abandon that joke and write a simpler observation based only on the supplied facts.
+AVOID:
+- politics, celebrity gossip, generic world news, crypto/finance, medical/legal claims
+- unrelated entertainment, stale stories, duplicated stories
+- marketing/corporate language
+- engagement bait such as "Agree?", "Thoughts?", or "Who else?"
+- first-person/personal claims: I, I'm, I've, my, me, mine
+- mentioning Gemini, ChatGPT, or AI as the generator
 
 HARD POST RULES:
-- Maximum {TARGET_POST_LENGTH} characters.
-- Plain text only.
-- No URL.
-- No hashtags.
-- No emojis unless genuinely necessary for the joke.
-- No thread, title, list, bullets, or quote formatting.
-- No engagement bait: no "Agree?", "Thoughts?", "Who else?", etc.
-- No manufactured controversy.
-- No marketing/corporate language.
-- Avoid generic AI-sounding phrases including: {", ".join(CANNED_PHRASES)}.
-- Do not mention that the post was generated.
-- Avoid repetitive template openings.
+- maximum {TARGET_POST_LENGTH} characters
+- plain text only
+- no URLs, hashtags, threads, bullets, or quote formatting
+- no fake enthusiasm
+- avoid these phrases: {", ".join(CANNED_PHRASES)}
 
 Return ONLY valid JSON:
 {{"topic":"...","reason":"...","post":"..."}}
@@ -284,34 +228,45 @@ Return ONLY valid JSON:
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={api_key}"
     )
-    body = json.dumps(
-        {"contents": [{"parts": [{"text": prompt}]}]}
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
+    body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=60) as response:
         payload = json.loads(response.read().decode("utf-8"))
 
     text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
     if text.startswith("```"):
         text = text.strip("`").replace("json\n", "", 1).strip()
-
     result = json.loads(text)
     result["post"] = re.sub(r"\s+", " ", result["post"].strip().strip('"'))
     return result
 
 
-def validate(post, history):
+def _evidence_terms(filtered_trends, candidates):
+    evidence = []
+    for lane_items in filtered_trends.values():
+        evidence.extend(item["name"] for item in lane_items)
+    evidence.extend(item["title"] for item in candidates)
+    evidence.extend(item["summary"] for item in candidates)
+    return " ".join(evidence).casefold()
+
+
+def _meaningful_words(text):
+    stop = {
+        "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
+        "from", "after", "before", "is", "are", "was", "were", "this", "that",
+        "it", "its", "has", "have", "had", "as", "at", "by", "be", "been",
+        "into", "than", "their", "they", "them", "will", "can", "just", "now",
+    }
+    words = re.findall(r"[a-z0-9][a-z0-9'’-]*", text.casefold())
+    return {word for word in words if len(word) >= 4 and word not in stop}
+
+
+def validate(post, history, filtered_trends, candidates):
     if not post:
         raise ValueError("Empty post")
     if len(post) > MAX_POST_LENGTH:
         raise ValueError(f"Post is {len(post)} characters; X limit is {MAX_POST_LENGTH}")
-    if "http://" in post.lower() or "https://" in post.lower() or "www." in post.lower():
+    if re.search(r"https?://|www\\.", post, re.I):
         raise ValueError("URL detected")
     if any(phrase in post.lower() for phrase in CANNED_PHRASES):
         raise ValueError("Canned/AI-sounding phrase detected")
@@ -319,8 +274,18 @@ def validate(post, history):
         raise ValueError("First-person/personal claim detected")
     if re.search(r"(?:\$|€|£)\s*\d|\b\d+(?:\.\d+)?\s*(?:dollars|bucks|million|billion|thousand)\b", post.lower()):
         raise ValueError("Unverified number or price detected")
+    for pattern in UNSUPPORTED_CLAIM_PATTERNS:
+        if re.search(pattern, post, re.I):
+            raise ValueError("Unsupported comparative/historical claim detected")
     if post in history:
         raise ValueError("Duplicate post")
+
+    # Require the generated post to retain at least one meaningful source term.
+    # This is a safety net against a totally unrelated model invention.
+    post_words = _meaningful_words(post)
+    evidence_words = _meaningful_words(_evidence_terms(filtered_trends, candidates))
+    if post_words and not (post_words & evidence_words):
+        raise ValueError("Post has no meaningful overlap with supplied sources")
 
 
 def load_history():
@@ -342,12 +307,10 @@ def save_history(history):
 
 async def post_to_x(text):
     client = Client("en-US")
-    client.set_cookies(
-        {
-            "auth_token": os.environ["X_AUTH_TOKEN"],
-            "ct0": os.environ["X_CT0"],
-        }
-    )
+    client.set_cookies({
+        "auth_token": os.environ["X_AUTH_TOKEN"],
+        "ct0": os.environ["X_CT0"],
+    })
     user = await client.user()
     print(f"Authenticated as @{user.screen_name}")
     tweet = await client.create_tweet(text=text)
@@ -363,38 +326,25 @@ def main():
     filtered_trends = filter_x_trends(x_trends)
     print("FILTERED X TRENDS:", json.dumps(filtered_trends, ensure_ascii=False, indent=2))
 
-    if not any(filtered_trends.values()):
-        print("No relevant X trends found; writer will use fresh RSS candidates.")
-
     history = load_history()
     last_error = None
-
     for attempt in range(3):
         try:
             result = gemini_generate(candidates, history, filtered_trends)
-            validate(result["post"], history)
+            validate(result["post"], history, filtered_trends, candidates)
             break
         except (ValueError, json.JSONDecodeError, KeyError) as exc:
             last_error = exc
+            print(f"WRITER REJECTED ATTEMPT {attempt + 1}: {exc}")
             if attempt == 2:
-                raise RuntimeError(
-                    f"Could not produce a valid post after 3 attempts: {exc}"
-                ) from exc
-    else:
-        raise RuntimeError(f"Could not produce a valid post: {last_error}")
+                raise RuntimeError(f"Could not produce a valid post after 3 attempts: {exc}") from exc
 
-    print(
-        json.dumps(
-            {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "attempt": attempt + 1,
-                "character_count": len(result["post"]),
-                **result,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    print(json.dumps({
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "attempt": attempt + 1,
+        "character_count": len(result["post"]),
+        **result,
+    }, ensure_ascii=False, indent=2))
 
     if os.environ.get("POST_TO_X", "false").lower() != "true":
         print("DRY RUN: set POST_TO_X=true only when you are ready to publish.")
