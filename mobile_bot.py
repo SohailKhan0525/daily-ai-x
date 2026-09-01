@@ -43,7 +43,7 @@ BLOCKED_TERMS = [
     "war", "military", "army", "navy", "air force", "nato", "sanctions",
     "ukraine", "russia", "israel", "iran", "palestine", "gaza", "china",
     "india", "pakistan", "united states", "u.s.", "usa", "america",
-    "united kingdom", " uk ", "canada", "australia", "japan", "korea",
+    "united kingdom", "uk", "canada", "australia", "japan", "korea",
     "france", "germany", "country", "geopolitics",
 ]
 
@@ -88,6 +88,14 @@ def norm(text):
     return re.sub(r"\s+", " ", str(text or "").strip())
 
 
+def contains_blocked(text):
+    low = norm(text).casefold()
+    return any(
+        re.search(r"(?<![\w])" + re.escape(term.casefold()) + r"(?![\w])", low)
+        for term in BLOCKED_TERMS
+    )
+
+
 def keyword_score(text, keywords):
     text = text.casefold()
     score = 0
@@ -99,10 +107,7 @@ def keyword_score(text, keywords):
 
 def allowed_topic(name):
     text = norm(name)
-    if not text:
-        return False
-    low = text.casefold()
-    if any(term in low for term in BLOCKED_TERMS):
+    if not text or contains_blocked(text):
         return False
     return max(keyword_score(text, kws) for kws in TOPIC_GROUPS.values()) > 0
 
@@ -305,7 +310,7 @@ def validate(result, x_topics, rss, history):
         raise ValueError("First-person claim detected")
     if any(re.search(p, post, re.I) for p in SUPERLATIVE_PATTERNS):
         raise ValueError("Unsupported superlative detected")
-    if any(term in post.casefold() for term in BLOCKED_TERMS):
+    if contains_blocked(post):
         raise ValueError("Blocked geopolitical/country term detected")
     if post in history:
         raise ValueError("Duplicate post")
