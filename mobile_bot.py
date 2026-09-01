@@ -41,6 +41,91 @@ CANNED_PHRASES = [
     "delve into",
 ]
 
+# Only these four lanes are allowed to reach the writer.
+TREND_LANES = {
+    "ai": [
+        "ai", "artificial intelligence", "chatgpt", "openai", "gemini", "claude",
+        "anthropic", "grok", "llm", "large language model", "model", "models",
+        "agent", "agents", "inference", "multimodal", "generative ai", "machine learning",
+        "deepmind", "copilot", "perplexity", "mistral", "qwen", "llama",
+    ],
+    "vibe_coding": [
+        "vibe coding", "vibecoding", "cursor", "windsurf", "lovable", "bolt.new",
+        "replit", "claude code", "codex", "copilot coding", "coding agent", "code agent",
+        "ai coding", "ai code", "ai-assisted coding", "ai assisted coding",
+    ],
+    "developers": [
+        "developer", "developers", "programming", "programmer", "coding", "code",
+        "github", "gitlab", "git", "vscode", "vs code", "visual studio code", "ide",
+        "sdk", "api", "npm", "pypi", "python", "javascript", "typescript", "rust",
+        "golang", "java", "kotlin", "swift", "docker", "kubernetes", "linux",
+        "compiler", "framework", "database", "devtools", "developer tools", "software",
+        "terminal", "cli", "repository", "repo", "open source",
+    ],
+    "sports": [
+        "sports", "football", "soccer", "basketball", "cricket", "tennis", "formula 1",
+        "f1", "nfl", "nba", "nhl", "mlb", "ipl", "wpl", "cpl", "arsenal", "barcelona",
+        "real madrid", "manchester", "liverpool", "chelsea", "ronaldo", "cristiano",
+        "messi", "mbappe", "neymar", "alcaraz", "djokovic", "nadal", "sinner",
+        "kohli", "rohit", "bumrah", "shubman", "dhoni", "hetmyer", "williams",
+        "goal", "match", "win", "loss", "retirement", "championship", "final",
+        "us open", "wimbledon", "grand slam",
+    ],
+}
+
+
+def _trend_score(name, keywords):
+    text = name.casefold()
+    score = 0
+    for keyword in keywords:
+        if keyword in text:
+            score += 2 if " " in keyword else 1
+    return score
+
+
+def filter_x_trends(x_trends, max_per_lane=8):
+    """Keep only relevant live X trends for the account's four content lanes."""
+    filtered = {lane: [] for lane in TREND_LANES}
+    seen = set()
+
+    # Prefer X's dedicated sports bucket when assigning sports trends.
+    ordered_categories = ["sports", "for-you", "news", "trending"]
+    for source_category in ordered_categories:
+        for raw_name in x_trends.get(source_category, []):
+            name = str(raw_name).strip()
+            if not name:
+                continue
+            key = name.casefold()
+            if key in seen:
+                continue
+
+            matches = []
+            for lane, keywords in TREND_LANES.items():
+                score = _trend_score(name, keywords)
+                if score:
+                    matches.append((score, lane))
+
+            if not matches:
+                continue
+
+            # Assign a trend to its strongest lane only, avoiding noisy duplicates.
+            score, lane = max(matches, key=lambda item: item[0])
+            # One-word generic matches such as "code", "model", or "win" are too noisy
+            # unless X's dedicated category gives us stronger context.
+            if score == 1 and source_category not in ("sports",):
+                continue
+
+            filtered[lane].append(
+                {"name": name, "score": score, "source": source_category}
+            )
+            seen.add(key)
+
+    for lane in filtered:
+        filtered[lane].sort(key=lambda item: item["score"], reverse=True)
+        filtered[lane] = filtered[lane][:max_per_lane]
+
+    return filtered
+
 
 async def collect_x_trends(count=30):
     """Fetch live X trends from the authenticated session."""
@@ -106,14 +191,14 @@ def collect_candidates(limit_per_feed=8):
     return candidates
 
 
-def gemini_generate(candidates, history, x_trends):
+def gemini_generate(candidates, history, filtered_trends):
     api_key = os.environ["GEMINI_API_KEY"]
     recent_history = history[-20:]
 
     prompt = f"""You write ONE short, funny, natural X post for a personal tech/developer account.
 
-LIVE X TRENDS RIGHT NOW:
-{json.dumps(x_trends, ensure_ascii=False, indent=2)}
+FILTERED LIVE X TRENDS RIGHT NOW:
+{json.dumps(filtered_trends, ensure_ascii=False, indent=2)}
 
 Fresh tech/developer candidate stories:
 {json.dumps(candidates, ensure_ascii=False, indent=2)}
@@ -125,16 +210,17 @@ CONTENT LANES — stay inside these:
 1. AI / AI tools / AI engineering
 2. Developers / programming / developer tools / IDEs
 3. Vibe coding / AI-assisted coding
-4. Sports — only when the X sports trend is genuinely interesting enough to make a sharp developer-style observation
+4. Sports — only when the live sports trend is genuinely interesting enough to make a sharp developer-style observation
 
 TREND-FIRST RULE:
-- Use the LIVE X TRENDS as the primary signal for what is hot right now.
+- The FILTERED LIVE X TRENDS are the primary signal for what is hot right now.
 - Prefer a relevant live X trend over an ordinary RSS story.
-- If a live trend is relevant to AI, coding, developers, vibe coding, or sports, build the post around that trend.
+- The trend must belong to one of the four lanes above.
 - You may use the supplied RSS stories only to add factual context to a relevant trend.
-- If today's X trends have nothing relevant in the four content lanes, choose the strongest fresh tech/developer RSS story instead.
+- If the filtered X trends contain relevant options, choose the strongest current one.
+- If there are no relevant filtered X trends, choose the strongest fresh tech/developer RSS story instead.
 - Never force an unrelated trend into the account's niche.
-- Never mention that something is trending unless the supplied X trend data actually contains it.
+- Never use a trend merely because it is popular; relevance comes first.
 
 Choose the strongest CURRENT topic. Prioritize:
 - genuinely fresh topics
@@ -152,6 +238,7 @@ Avoid:
 - unrelated entertainment
 - stale or low-signal stories
 - duplicated stories
+- religious or political hashtags unless the supplied trend is clearly a sports/AI/developer topic
 
 Then write an original observation or joke. Do NOT rewrite the headline or simply announce the trend.
 
@@ -273,14 +360,18 @@ def main():
         raise RuntimeError("No feed candidates found")
 
     x_trends = asyncio.run(collect_x_trends())
-    print("X trends loaded:", json.dumps(x_trends, ensure_ascii=False))
+    filtered_trends = filter_x_trends(x_trends)
+    print("FILTERED X TRENDS:", json.dumps(filtered_trends, ensure_ascii=False, indent=2))
+
+    if not any(filtered_trends.values()):
+        print("No relevant X trends found; writer will use fresh RSS candidates.")
 
     history = load_history()
     last_error = None
 
     for attempt in range(3):
         try:
-            result = gemini_generate(candidates, history, x_trends)
+            result = gemini_generate(candidates, history, filtered_trends)
             validate(result["post"], history)
             break
         except (ValueError, json.JSONDecodeError, KeyError) as exc:
