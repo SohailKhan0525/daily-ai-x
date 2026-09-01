@@ -205,6 +205,27 @@ def _gemini_request(prompt):
     return result
 
 
+def _trend_only_result(topic):
+    """Build a zero-hallucination post when the only evidence is the X trend itself."""
+    return {
+        "topic": topic,
+        "reason": "The selected topic is an X trend with no matching RSS evidence, so the post is limited to a meta observation about the trend.",
+        "post": f"{topic} is trending on X. The timeline has chosen its main character again.",
+    }
+
+
+def _best_trend_without_rss(filtered_trends, candidates):
+    ranked = []
+    for lane, items in filtered_trends.items():
+        for item in items:
+            if not _topic_has_rss_support(item["name"], candidates):
+                ranked.append((item["score"], item["source"] == "sports", item["name"]))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return ranked[0][2]
+
+
 def gemini_generate(candidates, history, filtered_trends):
     recent_history = history[-20:]
     source_text = _source_text(candidates, filtered_trends)
@@ -254,7 +275,7 @@ CANDIDATE POST:
 Return JSON only with exactly these fields:
 {{"ok": true/false, "reason": "short reason"}}
 
-Set ok=false if the post contains ANY factual claim that is not directly supported by the source material. Humor and opinions are allowed only when they do not smuggle in new factual claims. In particular, reject invented product/model capabilities, permissions, access, actions, tests, outcomes, numbers, rankings, motives, historical comparisons, or technical details. A topic merely being a trend does not establish what the topic or product can do."""
+Set ok=false if the post contains ANY factual claim that is not directly supported by the source material. Humor and opinions are allowed only when they do not smuggle in new factual claims. In particular, reject invented product/model capabilities, permissions, access, actions, tests, outcomes, numbers, rankings, motives, historical comparisons, or technical details. A topic merely being a trend does not establish what the topic or product can do. A meta observation about the trend itself is valid."""
     verified = _gemini_request_verify(prompt)
     if not verified.get("ok"):
         raise ValueError(f"Factuality gate rejected post: {verified.get('reason', 'unsupported claim')}")
@@ -289,6 +310,19 @@ def _gemini_request_verify(prompt):
     return json.loads(text)
 
 
+def _meaningful_words(text):
+    stop = {
+        "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
+        "from", "after", "before", "is", "are", "was", "were", "this", "that",
+        "it", "its", "has", "have", "had", "as", "at", "by", "be", "been",
+        "into", "than", "their", "they", "them", "will", "can", "just", "now",
+    }
+    return {
+        word for word in re.findall(r"[a-z0-9][a-z0-9'’-]*", text.casefold())
+        if len(word) >= 4 and word not in stop
+    }
+
+
 def _topic_has_rss_support(topic, candidates):
     topic_words = _meaningful_words(topic.replace("#", " "))
     if not topic_words:
@@ -307,19 +341,6 @@ def _trend_only_post_is_safe(post):
         re.search(pattern, post, re.I)
         for pattern in TREND_ONLY_CLAIM_PATTERNS
     )
-
-
-def _meaningful_words(text):
-    stop = {
-        "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
-        "from", "after", "before", "is", "are", "was", "were", "this", "that",
-        "it", "its", "has", "have", "had", "as", "at", "by", "be", "been",
-        "into", "than", "their", "they", "them", "will", "can", "just", "now",
-    }
-    return {
-        word for word in re.findall(r"[a-z0-9][a-z0-9'’-]*", text.casefold())
-        if len(word) >= 4 and word not in stop
-    }
 
 
 def validate(result, history, filtered_trends, candidates):
@@ -360,7 +381,6 @@ def validate(result, history, filtered_trends, candidates):
         if not _trend_only_post_is_safe(post):
             raise ValueError("Trend-only post contains an unsupported capability/action claim")
 
-    # Require overlap with the selected topic/source, not merely generic lane words.
     source_words = _meaningful_words(" ".join(allowed_topics))
     post_words = _meaningful_words(post)
     if post_words and not (post_words & source_words):
@@ -406,10 +426,15 @@ def main():
     print("FILTERED X TRENDS:", json.dumps(filtered_trends, ensure_ascii=False, indent=2))
 
     history = load_history()
+    trend_only_topic = _best_trend_without_rss(filtered_trends, candidates)
     last_error = None
     for attempt in range(3):
         try:
-            result = gemini_generate(candidates, history, filtered_trends)
+            if trend_only_topic:
+                result = _trend_only_result(trend_only_topic)
+                attempt = 0
+            else:
+                result = gemini_generate(candidates, history, filtered_trends)
             validate(result, history, filtered_trends, candidates)
             gemini_verify(result, candidates, filtered_trends)
             break
