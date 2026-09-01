@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -41,6 +42,36 @@ CANNED_PHRASES = [
 ]
 
 
+async def collect_x_trends(count=30):
+    """Fetch live X trends from the authenticated session."""
+    client = Client("en-US")
+    client.set_cookies(
+        {
+            "auth_token": os.environ["X_AUTH_TOKEN"],
+            "ct0": os.environ["X_CT0"],
+        }
+    )
+
+    categories = ["trending", "for-you", "news", "sports"]
+    result = {}
+
+    for category in categories:
+        try:
+            trends = await client.get_trends(category, count=count, retry=False)
+            names = []
+            for trend in trends:
+                name = getattr(trend, "name", None) or str(trend)
+                name = str(name).strip()
+                if name and name not in names:
+                    names.append(name)
+            result[category] = names
+        except Exception as exc:
+            print(f"X trends unavailable for {category}: {exc}")
+            result[category] = []
+
+    return result
+
+
 def collect_candidates(limit_per_feed=8):
     candidates = []
     seen_titles = set()
@@ -75,33 +106,54 @@ def collect_candidates(limit_per_feed=8):
     return candidates
 
 
-def gemini_generate(candidates, history):
+def gemini_generate(candidates, history, x_trends):
     api_key = os.environ["GEMINI_API_KEY"]
     recent_history = history[-20:]
 
     prompt = f"""You write ONE short, funny, natural X post for a personal tech/developer account.
 
-Fresh candidate stories:
+LIVE X TRENDS RIGHT NOW:
+{json.dumps(x_trends, ensure_ascii=False, indent=2)}
+
+Fresh tech/developer candidate stories:
 {json.dumps(candidates, ensure_ascii=False, indent=2)}
 
 Recent posts already used:
 {json.dumps(recent_history, ensure_ascii=False)}
 
-Choose the strongest CURRENT tech topic. Prioritize:
-- genuinely fresh stories
+CONTENT LANES — stay inside these:
+1. AI / AI tools / AI engineering
+2. Developers / programming / developer tools / IDEs
+3. Vibe coding / AI-assisted coding
+4. Sports — only when the X sports trend is genuinely interesting enough to make a sharp developer-style observation
+
+TREND-FIRST RULE:
+- Use the LIVE X TRENDS as the primary signal for what is hot right now.
+- Prefer a relevant live X trend over an ordinary RSS story.
+- If a live trend is relevant to AI, coding, developers, vibe coding, or sports, build the post around that trend.
+- You may use the supplied RSS stories only to add factual context to a relevant trend.
+- If today's X trends have nothing relevant in the four content lanes, choose the strongest fresh tech/developer RSS story instead.
+- Never force an unrelated trend into the account's niche.
+- Never mention that something is trending unless the supplied X trend data actually contains it.
+
+Choose the strongest CURRENT topic. Prioritize:
+- genuinely fresh topics
 - things developers are likely to care about
-- topics with surprise, irony, absurdity, or meme potential
-- stories that appear prominent across sources
-- practical developer/tooling topics when they are timely
+- surprise, irony, absurdity, or meme potential
+- practical developer/tooling topics when timely
+- a recognizable topic people are already discussing on X
 
 Avoid:
+- politics
+- celebrity gossip
+- generic world news
+- crypto/finance
+- medical/legal claims
+- unrelated entertainment
 - stale or low-signal stories
 - duplicated stories
-- political outrage bait
-- medical/legal/financial claims unless the story is directly about a technology product or developer tool
-- topics where the candidate text does not provide enough factual support
 
-Then write an original observation or joke. Do NOT rewrite the headline.
+Then write an original observation or joke. Do NOT rewrite the headline or simply announce the trend.
 
 VOICE:
 - sounds like a real developer casually posting
@@ -112,7 +164,7 @@ VOICE:
 - no fake enthusiasm
 
 FACTUALITY / AUTHENTICITY:
-- Only state facts supported by the supplied candidate stories.
+- Only state facts supported by the supplied X trends or candidate stories.
 - Never invent facts, numbers, prices, quotes, product capabilities, launches, or events.
 - NEVER invent a personal experience, action, conversation, test, purchase, or opinion for the account owner.
 - Do not use first-person claims such as "I", "I'm", "I've", "my", "me", or "mine".
@@ -220,12 +272,15 @@ def main():
     if not candidates:
         raise RuntimeError("No feed candidates found")
 
+    x_trends = asyncio.run(collect_x_trends())
+    print("X trends loaded:", json.dumps(x_trends, ensure_ascii=False))
+
     history = load_history()
     last_error = None
 
     for attempt in range(3):
         try:
-            result = gemini_generate(candidates, history)
+            result = gemini_generate(candidates, history, x_trends)
             validate(result["post"], history)
             break
         except (ValueError, json.JSONDecodeError, KeyError) as exc:
@@ -253,8 +308,6 @@ def main():
     if os.environ.get("POST_TO_X", "false").lower() != "true":
         print("DRY RUN: set POST_TO_X=true only when you are ready to publish.")
         return
-
-    import asyncio
 
     tweet_id = asyncio.run(post_to_x(result["post"]))
     history.append(result["post"])
