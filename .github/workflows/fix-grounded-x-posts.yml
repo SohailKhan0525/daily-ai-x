@@ -1,0 +1,69 @@
+name: fix-grounded-x-posts
+on:
+  push:
+    branches: [fix/grounded-x-posts]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch mobile_bot.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('mobile_bot.py')
+          text = path.read_text(encoding='utf-8')
+
+          old = 'UNSUPPORTED_CLAIM_PATTERNS = [\n'
+          new = '''TREND_ONLY_CLAIM_PATTERNS = [\n    r"\\b(?:terminal|repo|repository|codebase|filesystem|shell)\\s+(?:access|permissions?)\\b",\n    r"\\baccess\\s+to\\s+(?:the\\s+)?(?:terminal|repo|repository|codebase|filesystem|shell)\\b",\n    r"\\b(?:run|execute|fix|refactor|edit|modify|change|deploy|ship|commit|push)\\b",\n    r"\\b(?:can|could|will|lets|let's)\\s+(?:run|execute|fix|refactor|edit|modify|change|deploy|ship|commit|push)\\b",\n    r"\\b(?:autonomous|agentic)\\s+(?:model|agent|system)\\s+(?:can|could|will)\\b",\n]\n\nUNSUPPORTED_CLAIM_PATTERNS = [\n'''
+          if old not in text:
+              raise SystemExit('anchor 1 not found')
+          text = text.replace(old, new, 1)
+
+          anchor = '''def _meaningful_words(text):\n'''
+          helper = '''def _topic_has_rss_support(topic, candidates):\n    topic_words = _meaningful_words(topic.replace("#", " "))\n    if not topic_words:\n        return False\n    for item in candidates:\n        source_words = _meaningful_words(\n            f"{item.get('title', '')} {item.get('summary', '')}"\n        )\n        if len(topic_words & source_words) >= min(2, len(topic_words)):\n            return True\n    return False\n\n\ndef _trend_only_post_is_safe(post):\n    return not any(\n        re.search(pattern, post, re.I)\n        for pattern in TREND_ONLY_CLAIM_PATTERNS\n    )\n\n\n'''
+          if anchor not in text:
+              raise SystemExit('anchor 2 not found')
+          text = text.replace(anchor, helper + anchor, 1)
+
+          old_prompt = '''- Choose one exact topic from the supplied X trends when a relevant one exists.\n- RSS can provide factual context only; do not combine unrelated stories.\n'''
+          new_prompt = '''- Choose one exact topic from the supplied X trends when a relevant one exists.\n- If the chosen X trend has no matching RSS evidence, write a META-ONLY observation about the fact that the topic is trending. Do not claim what any product, model, agent, company, person, or tool can do.\n- RSS can provide factual context only; do not combine unrelated stories.\n'''
+          if old_prompt not in text:
+              raise SystemExit('anchor 3 not found')
+          text = text.replace(old_prompt, new_prompt, 1)
+
+          old_example = '''IMPORTANT EXAMPLE:\nIf the source says only "#AgenticAI is trending", a valid joke can say that the internet is currently very interested in agentic AI. It is NOT valid to claim that an agentic model has terminal access, can fix a linter, or can refactor a repository unless the source explicitly says that.\n'''
+          new_example = '''IMPORTANT EXAMPLE:\nIf the source says only "#AgenticAI is trending", a valid joke can say that agentic AI is suddenly all over the timeline. It is NOT valid to claim that an agentic model has terminal access, can fix a linter, or can refactor a repository unless an RSS source explicitly supports that claim.\n'''
+          if old_example not in text:
+              raise SystemExit('anchor 4 not found')
+          text = text.replace(old_example, new_example, 1)
+
+          old_validate = '''    if topic and not any(topic.casefold() == candidate.casefold() for candidate in allowed_topics):\n        raise ValueError("Topic is not present in supplied sources")\n\n    # Require overlap with the selected topic/source, not merely generic lane words.\n'''
+          new_validate = '''    if topic and not any(topic.casefold() == candidate.casefold() for candidate in allowed_topics):\n        raise ValueError("Topic is not present in supplied sources")\n\n    trend_names = {\n        item["name"].casefold()\n        for items in filtered_trends.values()\n        for item in items\n    }\n    if topic.casefold() in trend_names and not _topic_has_rss_support(topic, candidates):\n        if not _trend_only_post_is_safe(post):\n            raise ValueError("Trend-only post contains an unsupported capability/action claim")\n\n    # Require overlap with the selected topic/source, not merely generic lane words.\n'''
+          if old_validate not in text:
+              raise SystemExit('anchor 5 not found')
+          text = text.replace(old_validate, new_validate, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Validate and commit
+        run: |
+          python -m py_compile mobile_bot.py
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mobile_bot.py
+          git commit -m "fix: prevent unsupported trend claims [skip ci]"
+          git push origin HEAD:fix/grounded-x-posts
+
+      - name: Remove temporary workflow
+        run: |
+          git rm .github/workflows/fix-grounded-x-posts.yml
+          git commit -m "chore: remove temporary fix workflow [skip ci]"
+          git push origin HEAD:fix/grounded-x-posts
