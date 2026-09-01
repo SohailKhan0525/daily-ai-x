@@ -226,6 +226,14 @@ def _best_trend_without_rss(filtered_trends, candidates):
     return ranked[0][2]
 
 
+def _has_rss_backed_trend(filtered_trends, candidates):
+    return any(
+        _topic_has_rss_support(item["name"], candidates)
+        for items in filtered_trends.values()
+        for item in items
+    )
+
+
 def gemini_generate(candidates, history, filtered_trends):
     recent_history = history[-20:]
     source_text = _source_text(candidates, filtered_trends)
@@ -238,7 +246,7 @@ RECENT POSTS:
 {json.dumps(recent_history, ensure_ascii=False)}
 
 Rules:
-- Choose one exact topic from the supplied X trends when a relevant one exists.
+- Prefer an exact X trend that also has matching RSS evidence.
 - If the chosen X trend has no matching RSS evidence, write a META-ONLY observation about the fact that the topic is trending. Do not claim what any product, model, agent, company, person, or tool can do.
 - RSS can provide factual context only; do not combine unrelated stories.
 - Every factual statement in the post must be directly supported by the source material.
@@ -426,13 +434,15 @@ def main():
     print("FILTERED X TRENDS:", json.dumps(filtered_trends, ensure_ascii=False, indent=2))
 
     history = load_history()
-    trend_only_topic = _best_trend_without_rss(filtered_trends, candidates)
+    trend_only_topic = None
+    if not _has_rss_backed_trend(filtered_trends, candidates):
+        trend_only_topic = _best_trend_without_rss(filtered_trends, candidates)
+
     last_error = None
     for attempt in range(3):
         try:
             if trend_only_topic:
                 result = _trend_only_result(trend_only_topic)
-                attempt = 0
             else:
                 result = gemini_generate(candidates, history, filtered_trends)
             validate(result, history, filtered_trends, candidates)
