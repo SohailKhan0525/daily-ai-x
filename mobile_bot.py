@@ -31,8 +31,6 @@ CANNED_PHRASES = {
     "delve into",
 }
 
-# Keep lane keywords specific. Generic words such as "model", "code", "win",
-# "final", and "goal" are intentionally excluded because they create false matches.
 TREND_LANES = {
     "ai": [
         "ai", "artificial intelligence", "chatgpt", "openai", "gemini", "claude",
@@ -73,10 +71,7 @@ UNSUPPORTED_CLAIM_PATTERNS = [
     r"\bclearly the\b", r"\bby far\b", r"\bnumber one\b", r"\bno one saw\b",
 ]
 
-NUMBER_RE = re.compile(
-    r"(?:[$€£]\s*\d[\d,.]*\s*[kKmMbB]?|\b\d[\d,.]*\s*"
-    r"(?:million|billion|thousand|[kKmMbB])\b)"
-)
+NUMBER_RE = re.compile(r"\d|[$€£]|\b(?:million|billion|thousand)\b", re.I)
 
 
 def _env(name):
@@ -92,27 +87,17 @@ def _keyword_pattern(keyword):
 
 def _trend_score(name, keywords):
     text = name.casefold()
-    score = 0
-    for keyword in keywords:
-        if _keyword_pattern(keyword).search(text):
-            score += 2 if " " in keyword else 1
-    return score
+    return sum(2 if " " in k else 1 for k in keywords if _keyword_pattern(k).search(text))
 
 
 def filter_x_trends(x_trends, max_per_lane=8):
     filtered = {lane: [] for lane in TREND_LANES}
     seen = set()
-
-    # Sports gets first refusal so sports stories cannot be classified as tech.
     for source_category in ["sports", "for-you", "news", "trending"]:
         for raw_name in x_trends.get(source_category, []):
             name = str(raw_name).strip()
-            if not name:
+            if not name or name.casefold() in seen:
                 continue
-            key = name.casefold()
-            if key in seen:
-                continue
-
             matches = [
                 (_trend_score(name, keywords), lane)
                 for lane, keywords in TREND_LANES.items()
@@ -120,18 +105,11 @@ def filter_x_trends(x_trends, max_per_lane=8):
             matches = [(score, lane) for score, lane in matches if score > 0]
             if not matches:
                 continue
-
             score, lane = max(matches, key=lambda item: item[0])
             if score < 2 and lane != "sports":
                 continue
-
-            filtered[lane].append({
-                "name": name,
-                "score": score,
-                "source": source_category,
-            })
-            seen.add(key)
-
+            filtered[lane].append({"name": name, "score": score, "source": source_category})
+            seen.add(name.casefold())
     for lane in filtered:
         filtered[lane].sort(
             key=lambda item: (item["score"], item["source"] == "sports"),
@@ -143,23 +121,17 @@ def filter_x_trends(x_trends, max_per_lane=8):
 
 async def collect_x_trends(count=30):
     client = Client("en-US")
-    client.set_cookies({
-        "auth_token": _env("X_AUTH_TOKEN"),
-        "ct0": _env("X_CT0"),
-    })
+    client.set_cookies({"auth_token": _env("X_AUTH_TOKEN"), "ct0": _env("X_CT0")})
     result = {}
     for category in ["trending", "for-you", "news", "sports"]:
         try:
             trends = await client.get_trends(category, count=count, retry=False)
-            names = []
-            seen = set()
+            names, seen = [], set()
             for trend in trends:
-                name = getattr(trend, "name", None) or str(trend)
-                name = str(name).strip()
-                key = name.casefold()
-                if name and key not in seen:
+                name = str(getattr(trend, "name", None) or trend).strip()
+                if name and name.casefold() not in seen:
                     names.append(name)
-                    seen.add(key)
+                    seen.add(name.casefold())
             result[category] = names
         except Exception as exc:
             print(f"X trends unavailable for {category}: {exc}")
@@ -168,22 +140,17 @@ async def collect_x_trends(count=30):
 
 
 def collect_candidates(limit_per_feed=8):
-    candidates = []
-    seen_titles = set()
-
+    candidates, seen_titles = [], set()
     for source, url in FEEDS.items():
         feed = feedparser.parse(url)
         for entry in feed.entries[:limit_per_feed]:
             title = str(entry.get("title", "")).strip()
-            link = str(entry.get("link", "")).strip()
             if not title:
                 continue
-
             key = re.sub(r"\W+", " ", title.casefold()).strip()
             if key in seen_titles:
                 continue
             seen_titles.add(key)
-
             summary = re.sub(r"<[^>]+>", " ", str(entry.get("summary", "")))
             summary = re.sub(r"\s+", " ", summary).strip()[:800]
             candidates.append({
@@ -191,7 +158,7 @@ def collect_candidates(limit_per_feed=8):
                 "title": title,
                 "summary": summary,
                 "published": entry.get("published", entry.get("updated", "")),
-                "url": link,
+                "url": str(entry.get("link", "")).strip(),
             })
     return candidates
 
@@ -214,13 +181,12 @@ def _topic_has_rss_support(topic, candidates):
     topic_words = _meaningful_words(topic.replace("#", " "))
     if not topic_words:
         return False
-
-    for item in candidates:
-        source = f"{item.get('title', '')} {item.get('summary', '')}"
-        source_words = _meaningful_words(source)
-        if len(topic_words & source_words) >= min(2, len(topic_words)):
-            return True
-    return False
+    return any(
+        len(topic_words & _meaningful_words(
+            f"{item.get('title', '')} {item.get('summary', '')}"
+        )) >= min(2, len(topic_words))
+        for item in candidates
+    )
 
 
 def _source_text(candidates, filtered_trends):
@@ -229,75 +195,41 @@ def _source_text(candidates, filtered_trends):
         for item in items:
             lines.append(f"X trend [{lane}]: {item['name']}")
     for item in candidates:
-        lines.append(
-            f"RSS [{item['source']}]: {item['title']} — {item['summary']}"
-        )
+        lines.append(f"RSS [{item['source']}]: {item['title']} — {item['summary']}")
     return "\n".join(lines)
 
 
-def _gemini_request(prompt):
+def _gemini_call(prompt, verify=False):
     api_key = _env("GEMINI_API_KEY")
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={api_key}"
     )
+    if verify:
+        schema = {
+            "type": "OBJECT",
+            "properties": {"ok": {"type": "BOOLEAN"}, "reason": {"type": "STRING"}},
+            "required": ["ok", "reason"],
+        }
+    else:
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "topic": {"type": "STRING"},
+                "reason": {"type": "STRING"},
+                "post": {"type": "STRING"},
+            },
+            "required": ["topic", "reason", "post"],
+        }
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "response_schema": {
-                "type": "OBJECT",
-                "properties": {
-                    "topic": {"type": "STRING"},
-                    "reason": {"type": "STRING"},
-                    "post": {"type": "STRING"},
-                },
-                "required": ["topic", "reason", "post"],
-            },
+            "response_schema": schema,
         },
     }).encode("utf-8")
-
     request = urllib.request.Request(
-        url, data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-
-    text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
-    result = json.loads(text)
-    result["post"] = re.sub(
-        r"\s+", " ", str(result.get("post", "")).strip().strip('"')
-    )
-    return result
-
-
-def _gemini_verify(prompt):
-    api_key = _env("GEMINI_API_KEY")
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={api_key}"
-    )
-    body = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "response_mime_type": "application/json",
-            "response_schema": {
-                "type": "OBJECT",
-                "properties": {
-                    "ok": {"type": "BOOLEAN"},
-                    "reason": {"type": "STRING"},
-                },
-                "required": ["ok", "reason"],
-            },
-        },
-    }).encode("utf-8")
-
-    request = urllib.request.Request(
-        url, data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         payload = json.loads(response.read().decode("utf-8"))
@@ -305,21 +237,39 @@ def _gemini_verify(prompt):
     return json.loads(text)
 
 
-def _trend_only_result(topic):
-    return {
-        "topic": topic,
-        "reason": "No matching RSS evidence was found, so this is a trend-only observation.",
-        "post": f"{topic} is trending on X. The timeline has chosen its main character again.",
-    }
+def gemini_generate(candidates, history, filtered_trends, forced_topic):
+    source_text = _source_text(candidates, filtered_trends)
+    prompt = f"""Write ONE short, funny, natural X post for a personal tech/developer account.
 
+EXACT TOPIC TO WRITE ABOUT:
+{forced_topic}
 
-def _best_tech_trend_without_rss(filtered_trends):
-    ranked = []
-    for lane in ["ai", "vibe_coding", "developers"]:
-        for item in filtered_trends.get(lane, []):
-            ranked.append((item["score"], item["name"]))
-    ranked.sort(reverse=True)
-    return ranked[0][1] if ranked else None
+SOURCE MATERIAL — the ONLY factual ground truth:
+{source_text}
+
+RECENT POSTS:
+{json.dumps(history[-20:], ensure_ascii=False)}
+
+Rules:
+- The post must stay on the exact topic above.
+- Use only AI, vibe-coding, or developer material. Never use sports.
+- If the topic is an X trend with no matching RSS story, only comment on the fact that it is trending.
+- Never invent capabilities, permissions, access, actions, tests, outcomes, motives,
+  comparisons, dates, numbers, prices, rankings, anecdotes, or technical details.
+- Humor must be observational, not a made-up story.
+- No first-person claims.
+- No politics, celebrity gossip, generic world news, crypto/finance, medical/legal claims.
+- No engagement bait, URLs, hashtags, bullets, quotes, or thread formatting.
+- Do not use digits, prices, or number words.
+- Maximum {TARGET_POST_LENGTH} characters.
+- Avoid these phrases: {", ".join(sorted(CANNED_PHRASES))}
+- Avoid unsupported superlatives such as best, biggest, most effective, unprecedented,
+  historic, massive, huge, ever, or by far.
+
+Return JSON with topic, reason, and post only."""
+    result = _gemini_call(prompt)
+    result["post"] = re.sub(r"\s+", " ", str(result.get("post", "")).strip().strip('"'))
+    return result
 
 
 def _best_rss_backed_trend(filtered_trends, candidates):
@@ -332,64 +282,43 @@ def _best_rss_backed_trend(filtered_trends, candidates):
     return ranked[0][1] if ranked else None
 
 
-def gemini_generate(candidates, history, filtered_trends, forced_topic=None):
-    source_text = _source_text(candidates, filtered_trends)
-    recent_history = history[-20:]
-    forced = (
-        f"\nUse this exact X trend as the topic: {forced_topic}\n"
-        if forced_topic else ""
-    )
-
-    prompt = f"""Write ONE short, funny, natural X post for a personal tech/developer account.
-
-SOURCE MATERIAL — the ONLY factual ground truth:
-{source_text}
-{forced}
-RECENT POSTS:
-{json.dumps(recent_history, ensure_ascii=False)}
-
-Rules:
-- Only use AI, vibe-coding, or developer topics. Never choose sports.
-- Prefer an exact X trend that also has matching RSS evidence.
-- If the selected trend has no RSS evidence, make the post meta-only about the trend.
-- RSS provides factual context, but never combine unrelated stories.
-- Every factual statement must be directly supported by the supplied source material.
-- Never invent capabilities, permissions, access, actions, tests, outcomes, motives,
-  comparisons, dates, numbers, prices, rankings, anecdotes, or technical details.
-- A trend name alone does not prove what a product, model, company, person, or tool can do.
-- Humor must be observational rather than invented.
-- No first-person claims.
-- No politics, celebrity gossip, generic world news, crypto/finance, medical/legal claims.
-- No engagement bait.
-- No URLs, hashtags, bullets, quotes, or thread formatting.
-- Maximum {TARGET_POST_LENGTH} characters.
-- Avoid these phrases: {", ".join(sorted(CANNED_PHRASES))}
-- Do not use unsupported superlatives such as best, biggest, most effective,
-  unprecedented, historic, massive, huge, ever, or by far.
-
-Return JSON with topic, reason, and post only."""
-    return _gemini_request(prompt)
+def _best_tech_rss_topic(candidates):
+    ranked = []
+    for item in candidates:
+        text = f"{item['title']} {item['summary']}"
+        scores = {
+            lane: _trend_score(text, keywords)
+            for lane, keywords in TREND_LANES.items()
+            if lane != "sports"
+        }
+        tech_score = max(scores.values(), default=0)
+        sports_score = _trend_score(text, TREND_LANES["sports"])
+        if tech_score > 0 and tech_score >= sports_score:
+            ranked.append((tech_score, item["title"]))
+    ranked.sort(reverse=True)
+    return ranked[0][1] if ranked else None
 
 
-def _number_claim_is_supported(post, source_text):
-    normalized_source = re.sub(r"\s+", "", source_text).casefold()
-    for match in NUMBER_RE.finditer(post):
-        token = re.sub(r"\s+", "", match.group(0)).casefold()
-        if token not in normalized_source:
-            return False
-    return True
+def _best_tech_x_trend(filtered_trends):
+    ranked = []
+    for lane in ["ai", "vibe_coding", "developers"]:
+        for item in filtered_trends.get(lane, []):
+            ranked.append((item["score"], item["name"]))
+    ranked.sort(reverse=True)
+    return ranked[0][1] if ranked else None
 
 
 def validate(result, history, filtered_trends, candidates):
     post = str(result.get("post", "")).strip()
     topic = str(result.get("topic", "")).strip()
-
     if not post:
         raise ValueError("Empty post")
     if len(post) > MAX_POST_LENGTH:
         raise ValueError(f"Post is {len(post)} characters; X limit is {MAX_POST_LENGTH}")
     if re.search(r"https?://|www\.", post, re.I):
         raise ValueError("URL detected")
+    if NUMBER_RE.search(post):
+        raise ValueError("Numbers/prices are not allowed in generated posts")
     if any(phrase in post.casefold() for phrase in CANNED_PHRASES):
         raise ValueError("Canned/AI-sounding phrase detected")
     if re.search(r"\b(?:i|i'm|i’ve|i've|my|me|mine)\b", post.casefold()):
@@ -397,11 +326,6 @@ def validate(result, history, filtered_trends, candidates):
     for pattern in UNSUPPORTED_CLAIM_PATTERNS:
         if re.search(pattern, post, re.I):
             raise ValueError("Unsupported comparative/historical claim detected")
-
-    source_text = _source_text(candidates, filtered_trends)
-    if not _number_claim_is_supported(post, source_text):
-        raise ValueError("Unverified number or price detected")
-
     if post in history:
         raise ValueError("Duplicate post")
 
@@ -412,22 +336,12 @@ def validate(result, history, filtered_trends, candidates):
     if topic.casefold() not in {x.casefold() for x in allowed_topics}:
         raise ValueError("Topic is not present in supplied sources")
 
-    tech_trend_names = {
-        item["name"].casefold()
-        for lane in ["ai", "vibe_coding", "developers"]
-        for item in filtered_trends.get(lane, [])
-    }
-    if topic.casefold() in tech_trend_names:
-        if not _topic_has_rss_support(topic, candidates):
-            if re.search(
-                r"\b(?:can|could|will|run|execute|fix|refactor|edit|modify|change|"
-                r"deploy|ship|commit|push|access|permissions?)\b",
-                post, re.I,
-            ):
-                raise ValueError("Trend-only post contains an unsupported capability/action claim")
+    sports_names = {item["name"].casefold() for item in filtered_trends.get("sports", [])}
+    if topic.casefold() in sports_names:
+        raise ValueError("Sports topic rejected")
 
+    source_words = _meaningful_words(_source_text(candidates, filtered_trends))
     post_words = _meaningful_words(post)
-    source_words = _meaningful_words(source_text)
     if post_words and not (post_words & source_words):
         raise ValueError("Post has no meaningful overlap with supplied sources")
 
@@ -451,10 +365,7 @@ def save_history(history):
 
 async def post_to_x(text):
     client = Client("en-US")
-    client.set_cookies({
-        "auth_token": _env("X_AUTH_TOKEN"),
-        "ct0": _env("X_CT0"),
-    })
+    client.set_cookies({"auth_token": _env("X_AUTH_TOKEN"), "ct0": _env("X_CT0")})
     user = await client.user()
     print(f"Authenticated as @{user.screen_name}")
     tweet = await client.create_tweet(text=text)
@@ -466,36 +377,43 @@ def main():
     if not candidates:
         raise RuntimeError("No RSS feed candidates found")
 
-    x_trends = asyncio.run(collect_x_trends())
+    try:
+        x_trends = asyncio.run(collect_x_trends())
+    except Exception as exc:
+        print(f"X trend collection failed; continuing with RSS: {exc}")
+        x_trends = {}
+
     filtered_trends = filter_x_trends(x_trends)
     print("FILTERED X TRENDS:", json.dumps(filtered_trends, ensure_ascii=False, indent=2))
-
     history = load_history()
 
-    # Prefer a tech trend with RSS support. If none exists, use a tech-only
-    # trend fallback rather than drifting into sports or inventing context.
     forced_topic = _best_rss_backed_trend(filtered_trends, candidates)
-    trend_only = False
+    selection_mode = "X trend + RSS"
     if not forced_topic:
-        forced_topic = _best_tech_trend_without_rss(filtered_trends)
-        trend_only = forced_topic is not None
+        forced_topic = _best_tech_rss_topic(candidates)
+        selection_mode = "RSS fallback"
+    if not forced_topic:
+        forced_topic = _best_tech_x_trend(filtered_trends)
+        selection_mode = "X trend only"
+    if not forced_topic:
+        raise RuntimeError(
+            "No AI/vibe-coding/developer topic found in X trends or RSS feeds"
+        )
 
-    if not forced_topic:
-        raise RuntimeError("No relevant AI/vibe-coding/developer X trend found")
+    print(f"SELECTED TOPIC ({selection_mode}): {forced_topic}")
 
     for attempt in range(1, 4):
         try:
-            if trend_only:
-                result = _trend_only_result(forced_topic)
-            else:
-                result = gemini_generate(
-                    candidates, history, filtered_trends, forced_topic=forced_topic
-                )
-
+            result = gemini_generate(
+                candidates, history, filtered_trends, forced_topic=forced_topic
+            )
             validate(result, history, filtered_trends, candidates)
 
-            verification = _gemini_verify(
+            verification = _gemini_call(
                 f"""Strictly fact-check this proposed X post.
+
+EXACT TOPIC:
+{forced_topic}
 
 SOURCE MATERIAL:
 {_source_text(candidates, filtered_trends)}
@@ -503,12 +421,11 @@ SOURCE MATERIAL:
 POST:
 {result['post']}
 
-Return JSON only:
-{{"ok": true/false, "reason": "short reason"}}
-
-Reject any unsupported factual claim, including invented capabilities, access,
+Reject any unsupported factual claim. Reject invented capabilities, access,
 actions, tests, outcomes, numbers, rankings, motives, or technical details.
-A trend-only observation about the fact that something is trending is allowed."""
+A short observation about a supplied trend or RSS headline is allowed.
+Return JSON only with ok and reason.""",
+                verify=True,
             )
             if not verification.get("ok"):
                 raise ValueError(
