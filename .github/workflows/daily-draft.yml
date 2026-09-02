@@ -3,18 +3,20 @@ name: AI X Publisher
 on:
   workflow_dispatch:
   schedule:
-    # GitHub cron is UTC. These fire daily, but the job below
-    # allows only one of them on each calendar day.
-    # 8:00 PM IST = 14:30 UTC
-    - cron: '30 14 * * *'
-    # 12:00 AM IST = 18:30 UTC
-    - cron: '30 18 * * *'
+    # GitHub cron is UTC. We keep the alternating cadence:
+    # 8:00 PM IST and 12:00 AM IST on alternating calendar days.
+    - cron: '30 14 * * *' # 20:00 IST
+    - cron: '30 18 * * *' # 00:00 IST
+
+concurrency:
+  group: ai-x-publisher
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     env:
       TZ: Asia/Kolkata
       POST_TO_X: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
@@ -27,8 +29,7 @@ jobs:
           day="$(date +%d)"
 
           # Sequence: 8 PM on even days, then 12 AM on odd days.
-          # This gives one post every ~28 hours:
-          # 02 20:00 -> 03 00:00 -> 04 20:00 -> 05 00:00 ...
+          # Example: 02 20:00 -> 03 00:00 -> 04 20:00 -> 05 00:00 ...
           if [[ "$hour" == "20" && $((10#$day % 2)) -eq 0 ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "Selected 8 PM IST slot"
@@ -60,7 +61,23 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
           X_CT0: ${{ secrets.X_CT0 }}
-        run: python mobile_bot.py
+        run: python publisher_v2.py
+
+      - name: Persist post history
+        if: steps.slot.outputs.run == 'true'
+        shell: bash
+        run: |
+          if [[ -f post_history.json ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add post_history.json
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: persist X post history"
+              git push
+            else
+              echo "No post history changes to commit."
+            fi
+          fi
 
       - name: Manual run safety
         if: github.event_name == 'workflow_dispatch'
