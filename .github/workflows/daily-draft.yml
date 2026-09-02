@@ -3,6 +3,8 @@ name: AI X Publisher
 on:
   workflow_dispatch:
   schedule:
+    # GitHub cron is UTC. These fire daily, but the job below
+    # allows only one of them on each calendar day.
     # 8:00 PM IST = 14:30 UTC
     - cron: '30 14 * * *'
     # 12:00 AM IST = 18:30 UTC
@@ -15,23 +17,51 @@ jobs:
       contents: read
     env:
       TZ: Asia/Kolkata
-      # Scheduled runs publish; manual runs stay dry unless explicitly changed.
       POST_TO_X: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
     steps:
+      - name: Decide alternating slot
+        id: slot
+        shell: bash
+        run: |
+          hour="$(date +%H)"
+          day="$(date +%d)"
+
+          # Sequence: 8 PM on even days, then 12 AM on odd days.
+          # This gives one post every ~28 hours:
+          # 02 20:00 -> 03 00:00 -> 04 20:00 -> 05 00:00 ...
+          if [[ "$hour" == "20" && $((10#$day % 2)) -eq 0 ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Selected 8 PM IST slot"
+          elif [[ "$hour" == "00" && $((10#$day % 2)) -eq 1 ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Selected 12 AM IST slot"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Not the alternating slot; skipping publish"
+          fi
+
       - name: Checkout
+        if: steps.slot.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.slot.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: steps.slot.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         run: pip install -r requirements.txt
 
       - name: Generate and publish
+        if: steps.slot.outputs.run == 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
           X_CT0: ${{ secrets.X_CT0 }}
         run: python mobile_bot.py
+
+      - name: Manual run safety
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "Manual run is dry-run only; POST_TO_X remains false."
