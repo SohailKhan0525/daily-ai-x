@@ -5,6 +5,7 @@ import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 import feedparser
 from twikit import Client
@@ -74,7 +75,8 @@ SUPERLATIVE_PATTERNS = [
     r"\bunprecedented\b", r"\bhistoric\b", r"\bby far\b", r"\bnumber one\b",
 ]
 
-NUMBER_RE = re.compile(r"\d|[$€£]|\b(?:million|billion|thousand)\b", re.I)
+# Match complete numeric tokens so 5.1 is treated as one value.
+NUMBER_RE = re.compile(r"(?<![\w])(?:[$€£]\s*)?(?:\d+(?:\.\d+)?)(?:\s*(?:million|billion|thousand))?(?![\w])", re.I)
 
 
 def env(name):
@@ -132,7 +134,7 @@ def save_history(history):
 
 
 async def twikit_global_trends(client, count=50):
-    """Use Twikit's live trend API, with a global library-native fallback."""
+    """Try Twikit's live global trends. RSS remains a safe fallback if X changes its API."""
     trends = []
     get_trends = getattr(client, "get_trends", None)
     if get_trends:
@@ -154,7 +156,8 @@ async def twikit_global_trends(client, count=50):
     if trends:
         return [norm(getattr(t, "name", t)) for t in trends if norm(getattr(t, "name", t))]
 
-    # WOEID 1 is worldwide. This avoids choosing a country/region.
+    # WOEID 1 is worldwide. Some Twikit releases/X responses no longer support this path;
+    # treat that as a non-fatal trend-source failure rather than failing the whole publisher.
     try:
         place = await client.get_place_trends(1)
         raw = getattr(place, "trends", None) or (
@@ -242,7 +245,7 @@ def gemini_call(prompt):
         "generationConfig": {
             "response_mime_type": "application/json",
             "response_schema": schema,
-            "temperature": 0.8,
+            "temperature": 0.7,
         },
     }).encode()
     request = urllib.request.Request(
@@ -269,14 +272,16 @@ Never write about:
 Pentagon, US/USA/America, any country, elections, governments, politics,
 military, geopolitics, wars, or country-specific news.
 
-LIVE SOURCE MATERIAL — factual ground truth:
+LIVE SOURCE MATERIAL — this is the ONLY factual ground truth:
 {material}
 
 RECENT POSTS:
 {json.dumps(history[-20:], ensure_ascii=False)}
 
 Rules:
-- Pick the strongest CURRENT technology/AI/coding/gaming topic from the source material.
+- Select ONE source item.
+- The JSON field "topic" MUST copy the selected source title/topic VERBATIM.
+- The post must discuss only that selected source item.
 - Prefer a higher-ranked Twikit X trend when it is relevant.
 - If an X trend has no article attached, only make an observation about the trend itself.
 - Never invent facts, numbers, prices, dates, tests, capabilities, access, motives,
@@ -288,11 +293,33 @@ Rules:
 - Avoid canned phrases: {", ".join(sorted(CANNED_PHRASES))}
 - Avoid unsupported superlatives such as best, biggest, most effective,
   unprecedented, historic, or by far.
-- Numbers are allowed only when directly present in the source material.
+- Numbers are allowed only when directly present in the selected source material.
 Return JSON with topic, reason, post."""
     result = gemini_call(prompt)
     result["post"] = norm(str(result.get("post", "")).strip('"'))
     return result
+
+
+def source_candidates(x_topics, rss):
+    return [x["name"] for x in x_topics] + [x["title"] for x in rss]
+
+
+def topic_is_grounded(topic, candidates):
+    topic_low = norm(topic).casefold()
+    if not topic_low:
+        return False
+    for candidate in candidates:
+        cand_low = norm(candidate).casefold()
+        if topic_low == cand_low:
+            return True
+        # Allow harmless punctuation/wording normalization while still requiring
+        # substantial overlap with a real supplied source title.
+        ratio = SequenceMatcher(None, topic_low, cand_low).ratio()
+        shorter = min(len(topic_low), len(cand_low))
+        containment = shorter >= 18 and (topic_low in cand_low or cand_low in topic_low)
+        if ratio >= 0.72 or containment:
+            return True
+    return False
 
 
 def validate(result, x_topics, rss, history):
@@ -310,25 +337,22 @@ def validate(result, x_topics, rss, history):
         raise ValueError("First-person claim detected")
     if any(re.search(p, post, re.I) for p in SUPERLATIVE_PATTERNS):
         raise ValueError("Unsupported superlative detected")
-    if contains_blocked(post):
+    if contains_blocked(post) or contains_blocked(topic):
         raise ValueError("Blocked geopolitical/country term detected")
     if post in history:
         raise ValueError("Duplicate post")
 
-    allowed = {x["name"].casefold() for x in x_topics}
-    allowed.update(x["title"].casefold() for x in rss)
-    if topic.casefold() not in allowed:
-        raise ValueError("Generated topic was not in supplied source material")
+    candidates = source_candidates(x_topics, rss)
+    if not topic_is_grounded(topic, candidates):
+        raise ValueError("Generated topic was not grounded in supplied source material")
     if not allowed_topic(topic):
         raise ValueError("Generated topic is outside the allowed topic set")
 
-    # If a generated number/price is present, it must exist in the supplied sources.
-    post_numbers = NUMBER_RE.findall(post)
-    if post_numbers:
-        source_numbers = NUMBER_RE.findall(source_text(x_topics, rss))
-        source_number_set = {x.casefold() for x in source_numbers}
-        if any(n.casefold() not in source_number_set for n in post_numbers):
-            raise ValueError("Unverified number or price detected")
+    # Verify complete numeric tokens against the supplied source material.
+    post_numbers = {x.casefold().replace(" ", "") for x in NUMBER_RE.findall(post)}
+    source_numbers = {x.casefold().replace(" ", "") for x in NUMBER_RE.findall(source_text(x_topics, rss))}
+    if not post_numbers.issubset(source_numbers):
+        raise ValueError("Unverified number or price detected")
     return post
 
 
