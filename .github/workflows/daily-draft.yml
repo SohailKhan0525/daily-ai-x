@@ -6,10 +6,15 @@ on:
     branches: [main]
     paths-ignore:
       - post_history.json
+      - slot_state.json
   schedule:
-    # GitHub cron is UTC: 08:00 IST = 02:30 UTC; 16:00 IST = 10:30 UTC.
-    - cron: '30 2 * * *'
-    - cron: '30 10 * * *'
+    # Use the real India timezone. GitHub supports IANA timezones.
+    # We intentionally retry within each target hour because scheduled
+    # events can be delayed or dropped during GitHub load.
+    - cron: '0-55/5 8 * * *'
+      timezone: 'Asia/Kolkata'
+    - cron: '0-55/5 16 * * *'
+      timezone: 'Asia/Kolkata'
 
 concurrency:
   group: ai-x-publisher
@@ -27,6 +32,49 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Identify publishing slot
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          hour="$(date +%H)"
+          minute="$(date +%M)"
+          today="$(date +%Y-%m-%d)"
+
+          if [[ "$hour" == "08" ]]; then
+            slot="${today}-08"
+          elif [[ "$hour" == "16" ]]; then
+            slot="${today}-16"
+          else
+            echo "Outside publishing windows: $(date)"
+            exit 0
+          fi
+
+          echo "PUBLISH_SLOT=$slot" >> "$GITHUB_ENV"
+          echo "Scheduled slot: $slot (current local time: $(date))"
+
+      - name: Skip already-published slot
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          if [[ -f slot_state.json ]]; then
+            published_slot="$(python - <<'PY'
+          import json
+          try:
+              with open('slot_state.json', encoding='utf-8') as f:
+                  print(json.load(f).get('last_slot', ''))
+          except Exception:
+              print('')
+          PY
+          )"
+            echo "Last published slot: $published_slot"
+            if [[ "$published_slot" == "$PUBLISH_SLOT" ]]; then
+              echo "This slot already published successfully. Exiting without another post."
+              exit 0
+            fi
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -70,24 +118,39 @@ jobs:
             exit 1
           fi
 
-      - name: Persist post history
-        if: github.event_name == 'schedule'
+      - name: Mark slot published
+        if: success() && github.event_name == 'schedule'
         shell: bash
         run: |
-          if [[ -f post_history.json ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add post_history.json
-            if ! git diff --cached --quiet; then
-              git commit -m "chore: persist X post history"
-              git push
-            else
-              echo "No post history changes to commit."
-            fi
+          python - <<'PY'
+          import json
+          from datetime import datetime
+          slot = __import__('os').environ['PUBLISH_SLOT']
+          with open('slot_state.json', 'w', encoding='utf-8') as f:
+              json.dump({
+                  'last_slot': slot,
+                  'published_at': datetime.now().astimezone().isoformat(),
+              }, f, indent=2)
+              f.write('\n')
+          PY
+
+      - name: Persist state
+        if: success() && github.event_name == 'schedule'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add post_history.json slot_state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: persist X publisher state"
+            git push
+          else
+            echo "No state changes to commit."
           fi
 
       - name: Schedule confirmation
         if: always()
         run: |
-          echo "Daily publishing windows: 08:00 IST and 16:00 IST"
-          echo "Scheduled runs are the only live-post mode."
+          echo "Publishing windows: 08:00-08:55 IST and 16:00-16:55 IST"
+          echo "A scheduled run retries every 5 minutes inside each window."
+          echo "Only scheduled runs can publish to X."
