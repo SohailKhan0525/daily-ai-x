@@ -2,6 +2,10 @@ name: AI X Publisher
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - post_history.json
   schedule:
     # GitHub cron is UTC: 08:00 IST = 02:30 UTC; 16:00 IST = 10:30 UTC.
     - cron: '30 2 * * *'
@@ -18,8 +22,8 @@ jobs:
       contents: write
     env:
       TZ: Asia/Kolkata
-      POST_TO_X: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
       PYTHONUNBUFFERED: '1'
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,15 +36,22 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Generate and publish (scheduled only)
-        if: github.event_name == 'schedule'
+      - name: Run publisher
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
           X_CT0: ${{ secrets.X_CT0 }}
+          POST_TO_X: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
         shell: bash
         run: |
-          echo "Scheduled publish: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          echo "Trigger: ${{ github.event_name }}"
+          echo "Local time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          if [[ "$POST_TO_X" == "true" ]]; then
+            echo "MODE: LIVE scheduled publish"
+          else
+            echo "MODE: DRY RUN (no X post)"
+          fi
+
           success=0
           for attempt in 1 2 3; do
             echo "Publisher attempt $attempt/3"
@@ -48,23 +59,16 @@ jobs:
               success=1
               break
             fi
-            echo "Publisher failed; retrying after backoff..."
-            sleep $((20 * attempt))
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "Publisher failed; retrying after backoff..."
+              sleep $((30 * attempt))
+            fi
           done
+
           if [[ "$success" -ne 1 ]]; then
             echo "ERROR: publisher failed after 3 attempts"
             exit 1
           fi
-
-      - name: Manual run safety
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
-          X_CT0: ${{ secrets.X_CT0 }}
-        run: |
-          echo "Manual run is DRY-RUN only; no X post will be published."
-          POST_TO_X=false python publisher_v2.py
 
       - name: Persist post history
         if: github.event_name == 'schedule'
@@ -84,4 +88,6 @@ jobs:
 
       - name: Schedule confirmation
         if: always()
-        run: echo "Daily publishing windows: 08:00 IST and 16:00 IST"
+        run: |
+          echo "Daily publishing windows: 08:00 IST and 16:00 IST"
+          echo "Scheduled runs are the only live-post mode."
