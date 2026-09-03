@@ -8,24 +8,24 @@ on:
       - post_history.json
       - slot_state.json
   # India time: 09:05 through 20:50, every 15 minutes.
-  # These are 03:35 through 15:20 UTC and avoid the top of the hour.
+  # Staggered away from :00 to reduce GitHub Actions scheduler congestion.
   schedule:
-    - cron: '35,50 3 * * *'
-    - cron: '5,20,35,50 4-14 * * *'
-    - cron: '5,20 15 * * *'
+    - cron: '5,20,35,50 9-20 * * *'
+      timezone: Asia/Kolkata
 
 concurrency:
   group: ai-x-publisher
   cancel-in-progress: false
+
+env:
+  TZ: Asia/Kolkata
+  PYTHONUNBUFFERED: '1'
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      TZ: Asia/Kolkata
-      PYTHONUNBUFFERED: '1'
 
     steps:
       - name: Checkout
@@ -164,5 +164,7 @@ jobs:
           echo "Publishing window: 09:00-21:00 IST"
           echo "Cadence: every 15 minutes"
           echo "Live scheduled slots: 09:05-20:50 IST"
+          echo "Timezone: Asia/Kolkata"
           echo "Scheduled runs are LIVE; push/manual runs only validate code."
+          echo "POST_TO_X is forced true only for scheduled runs."
           echo "Gemini primary + optional backup key are supported."
