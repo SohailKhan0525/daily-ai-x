@@ -7,9 +7,8 @@ on:
     paths-ignore:
       - post_history.json
       - slot_state.json
-  # 09:00-21:00 IST is 03:30-15:30 UTC.
-  # Offset by 5 minutes to reduce top-of-hour congestion.
-  # Actual publishing slots: 09:05 through 20:50 IST, every 15 minutes.
+  # India time: 09:05 through 20:50, every 15 minutes.
+  # These are 03:35 through 15:20 UTC and avoid the top of the hour.
   schedule:
     - cron: '35,50 3 * * *'
     - cron: '5,20,35,50 4-14 * * *'
@@ -45,7 +44,7 @@ jobs:
           slot=$(printf '%s-%02d-%02d' "$today" "$hour" "$slot_minute")
 
           if (( 10#$hour < 9 || 10#$hour > 20 )); then
-            echo "Outside 09:00-20:59 IST publishing window: $(date)"
+            echo "Outside 09:00-21:00 IST publishing window: $(date)"
             exit 0
           fi
 
@@ -81,25 +80,33 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Validate code on non-scheduled runs
+        if: github.event_name != 'schedule'
+        run: python -m py_compile publisher_v3.py
+
       - name: Run publisher
+        if: github.event_name == 'schedule'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEY_BACKUP: ${{ secrets.GEMINI_API_KEY_BACKUP }}
           X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
           X_CT0: ${{ secrets.X_CT0 }}
+          POST_TO_X: 'true'
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            export POST_TO_X=true
-            echo "Trigger: schedule"
-            echo "MODE: LIVE scheduled publish"
-            echo "POST_TO_X=$POST_TO_X"
-            echo "PUBLISH_SLOT=$PUBLISH_SLOT"
-          else
-            export POST_TO_X=false
-            echo "Trigger: ${{ github.event_name }}"
-            echo "MODE: DRY RUN (no X post)"
-            echo "POST_TO_X=$POST_TO_X"
+          echo "Trigger: schedule"
+          echo "MODE: LIVE scheduled publish"
+          echo "POST_TO_X=$POST_TO_X"
+          echo "PUBLISH_SLOT=$PUBLISH_SLOT"
+          echo "Gemini primary configured: $([[ -n "$GEMINI_API_KEY" ]] && echo yes || echo no)"
+          echo "Gemini backup configured: $([[ -n "$GEMINI_API_KEY_BACKUP" ]] && echo yes || echo no)"
+
+          if [[ -z "$GEMINI_API_KEY" ]]; then
+            echo "ERROR: GEMINI_API_KEY is missing"
+            exit 1
+          fi
+          if [[ -z "$GEMINI_API_KEY_BACKUP" ]]; then
+            echo "WARNING: GEMINI_API_KEY_BACKUP is missing; the run has only one Gemini key."
           fi
 
           success=0
@@ -156,6 +163,6 @@ jobs:
         run: |
           echo "Publishing window: 09:00-21:00 IST"
           echo "Cadence: every 15 minutes"
-          echo "Actual scheduled slots: 09:05-20:50 IST"
-          echo "Scheduled runs are LIVE; push/manual runs are DRY RUN."
-          echo "Gemini primary + optional backup key are configured."
+          echo "Live scheduled slots: 09:05-20:50 IST"
+          echo "Scheduled runs are LIVE; push/manual runs only validate code."
+          echo "Gemini primary + optional backup key are supported."
