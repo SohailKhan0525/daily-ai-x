@@ -8,10 +8,12 @@ on:
       - post_history.json
       - slot_state.json
   # 09:00-21:00 IST is 03:30-15:30 UTC.
-  # Run every 15 minutes, offset by 5 minutes to reduce top-of-hour congestion.
+  # Offset by 5 minutes to reduce top-of-hour congestion.
+  # Actual publishing slots: 09:05 through 20:50 IST, every 15 minutes.
   schedule:
-    - cron: '5,20,35,50 3-14 * * *'
-    - cron: '5,20,35,50 15 * * *'
+    - cron: '35,50 3 * * *'
+    - cron: '5,20,35,50 4-14 * * *'
+    - cron: '5,20 15 * * *'
 
 concurrency:
   group: ai-x-publisher
@@ -154,5 +156,6 @@ jobs:
         run: |
           echo "Publishing window: 09:00-21:00 IST"
           echo "Cadence: every 15 minutes"
+          echo "Actual scheduled slots: 09:05-20:50 IST"
           echo "Scheduled runs are LIVE; push/manual runs are DRY RUN."
           echo "Gemini primary + optional backup key are configured."
