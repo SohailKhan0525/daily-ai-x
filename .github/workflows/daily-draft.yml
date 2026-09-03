@@ -7,11 +7,15 @@ on:
     paths-ignore:
       - post_history.json
       - slot_state.json
+  # GitHub Actions schedules are expressed in UTC here deliberately.
+  # 08:00 IST = 02:30 UTC; 16:00 IST = 10:30 UTC.
+  # We check every 5 minutes for one hour so a delayed scheduler event
+  # can still catch the intended publishing slot.
   schedule:
-    - cron: '0-55/5 8 * * *'
-      timezone: 'Asia/Kolkata'
-    - cron: '0-55/5 16 * * *'
-      timezone: 'Asia/Kolkata'
+    - cron: '30-59/5 2 * * *'
+    - cron: '0-25/5 3 * * *'
+    - cron: '30-59/5 10 * * *'
+    - cron: '0-25/5 11 * * *'
 
 concurrency:
   group: ai-x-publisher
@@ -87,9 +91,7 @@ jobs:
           X_CT0: ${{ secrets.X_CT0 }}
         shell: bash
         run: |
-          # Set this explicitly in the shell. Scheduled runs are LIVE;
-          # push/manual runs are DRY RUN. This avoids relying on expression
-          # coercion when passing the value into Python.
+          # Scheduled runs are LIVE. Push/manual runs are deliberately DRY RUN.
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             export POST_TO_X=true
             echo "Trigger: schedule"
