@@ -3,10 +3,9 @@ name: AI X Publisher
 on:
   workflow_dispatch:
   schedule:
-    # GitHub cron is UTC. We keep the alternating cadence:
-    # 8:00 PM IST and 12:00 AM IST on alternating calendar days.
-    - cron: '30 14 * * *' # 20:00 IST
-    - cron: '30 18 * * *' # 00:00 IST
+    # GitHub cron is UTC: 08:00 IST = 02:30 UTC; 16:00 IST = 10:30 UTC.
+    - cron: '30 2 * * *'
+    - cron: '30 10 * * *'
 
 concurrency:
   group: ai-x-publisher
@@ -20,51 +19,55 @@ jobs:
     env:
       TZ: Asia/Kolkata
       POST_TO_X: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+      PYTHONUNBUFFERED: '1'
     steps:
-      - name: Decide alternating slot
-        id: slot
-        shell: bash
-        run: |
-          hour="$(date +%H)"
-          day="$(date +%d)"
-
-          # Sequence: 8 PM on even days, then 12 AM on odd days.
-          # Example: 02 20:00 -> 03 00:00 -> 04 20:00 -> 05 00:00 ...
-          if [[ "$hour" == "20" && $((10#$day % 2)) -eq 0 ]]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "Selected 8 PM IST slot"
-          elif [[ "$hour" == "00" && $((10#$day % 2)) -eq 1 ]]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "Selected 12 AM IST slot"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Not the alternating slot; skipping publish"
-          fi
-
       - name: Checkout
-        if: steps.slot.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
 
       - name: Set up Python
-        if: steps.slot.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install dependencies
-        if: steps.slot.outputs.run == 'true' || github.event_name == 'workflow_dispatch'
         run: pip install -r requirements.txt
 
-      - name: Generate and publish
-        if: steps.slot.outputs.run == 'true'
+      - name: Generate and publish (scheduled only)
+        if: github.event_name == 'schedule'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
           X_CT0: ${{ secrets.X_CT0 }}
-        run: python publisher_v2.py
+        shell: bash
+        run: |
+          echo "Scheduled publish: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          success=0
+          for attempt in 1 2 3; do
+            echo "Publisher attempt $attempt/3"
+            if python publisher_v2.py; then
+              success=1
+              break
+            fi
+            echo "Publisher failed; retrying after backoff..."
+            sleep $((20 * attempt))
+          done
+          if [[ "$success" -ne 1 ]]; then
+            echo "ERROR: publisher failed after 3 attempts"
+            exit 1
+          fi
+
+      - name: Manual run safety
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
+          X_CT0: ${{ secrets.X_CT0 }}
+        run: |
+          echo "Manual run is DRY-RUN only; no X post will be published."
+          POST_TO_X=false python publisher_v2.py
 
       - name: Persist post history
-        if: steps.slot.outputs.run == 'true'
+        if: github.event_name == 'schedule'
         shell: bash
         run: |
           if [[ -f post_history.json ]]; then
@@ -79,6 +82,6 @@ jobs:
             fi
           fi
 
-      - name: Manual run safety
-        if: github.event_name == 'workflow_dispatch'
-        run: echo "Manual run is dry-run only; POST_TO_X remains false."
+      - name: Schedule confirmation
+        if: always()
+        run: echo "Daily publishing windows: 08:00 IST and 16:00 IST"
