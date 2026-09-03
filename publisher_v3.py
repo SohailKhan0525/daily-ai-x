@@ -1,19 +1,18 @@
 import asyncio
-import hashlib
 import json
 import os
 import re
 import urllib.parse
 import urllib.request
-import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime
 
 import feedparser
 from twikit import Client
 
 MAX_POST_LENGTH = 280
 HISTORY_FILE = "post_history.json"
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+# Gemini's current stable Flash model for this API path.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
 
 ALLOWED = [
     "gemini", "claude", "chatgpt", "openai", "opencode", "openclaw",
@@ -65,6 +64,11 @@ def allowed(s):
     )
 
 
+def title_is_allowed(title):
+    # Do not select an unrelated story merely because its summary mentions AI.
+    return allowed(title)
+
+
 def env(name, required=True):
     value = os.getenv(name, "").strip()
     if required and not value:
@@ -92,11 +96,10 @@ def collect_sources():
     for source, url in FEEDS.items():
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:12]:
+            for entry in feed.entries[:15]:
                 title = norm(entry.get("title"))
-                summary = norm(re.sub(r"<[^>]+>", " ", str(entry.get("summary", ""))))[:1200]
-                text = f"{title} {summary}"
-                if not title or not allowed(text):
+                summary = norm(re.sub(r"<[^>]+>", " ", str(entry.get("summary", ""))))[:1400]
+                if not title or not title_is_allowed(title):
                     continue
                 key = re.sub(r"\W+", " ", title.casefold()).strip()
                 if key in seen:
@@ -117,9 +120,13 @@ def choose_source(items, history):
     return pool[0]
 
 
+def gemini_keys():
+    keys = [os.getenv("GEMINI_API_KEY", "").strip(), os.getenv("GEMINI_API_KEY_BACKUP", "").strip()]
+    return list(dict.fromkeys(k for k in keys if k))
+
+
 def gemini_call(prompt):
-    keys = [env("GEMINI_API_KEY", required=False), env("GEMINI_API_KEY_BACKUP", required=False)]
-    keys = list(dict.fromkeys(k for k in keys if k))
+    keys = gemini_keys()
     if not keys:
         raise RuntimeError("No Gemini API key configured")
     last = None
@@ -153,14 +160,12 @@ def gemini_call(prompt):
 
 
 def funny_slot():
-    now = datetime.now().astimezone()
-    # Roughly one funny post per hour, deterministically, without making every post a joke.
-    return now.minute == 45
+    return datetime.now().astimezone().minute == 45
 
 
 def make_post(source, history):
     tone = (
-        "Make this one genuinely funny or witty about AI/technology, while staying accurate."
+        "Make this one genuinely funny or witty about the specific AI/technology topic, while staying accurate."
         if funny_slot() else
         "Make this useful, sharp, conversational, and insight-driven."
     )
@@ -171,7 +176,7 @@ AI, machine learning, coding/developer tools, software, technology, or gaming.
 Never mention or discuss countries, governments, politics, military, geopolitics,
 the Pentagon, or the US/USA/America.
 
-SOURCE (the only factual grounding):
+SOURCE — the only factual grounding:
 Title: {source['title']}
 Summary: {source['summary']}
 
@@ -180,13 +185,12 @@ Recent posts to avoid repeating:
 
 {tone}
 Rules:
-- Hook quickly with the specific topic.
+- Hook quickly with the specific topic from the title.
 - Add one concrete implication, observation, contrast, or joke grounded in the source.
 - Do not invent numbers, dates, capabilities, quotes, tests, rankings, prices, or outcomes.
 - No URLs, hashtags, bullets, generic engagement bait, or fake personal experience.
 - Avoid phrases like game-changer, revolutionary, transformative, exciting times, and let that sink in.
-- Do not use first-person claims.
-- Do not use unsupported superlatives.
+- Do not use first-person claims or unsupported superlatives.
 - Return JSON with exactly: post, reason.
 """
     return gemini_call(prompt)
@@ -208,11 +212,15 @@ def validate(post, source, history):
         raise ValueError("First-person claim detected")
     if post.casefold() in {x.casefold() for x in history}:
         raise ValueError("Duplicate post")
+    title_terms = [x for x in ALLOWED if re.search(r"(?<![\w])" + re.escape(x) + r"(?![\w])", source["title"].casefold())]
+    if title_terms and not any(x in post.casefold() for x in title_terms):
+        raise ValueError("Post lost the selected topic")
     return post
 
 
 async def main():
-    if os.getenv("POST_TO_X", "false").lower() != "true":
+    live = os.getenv("POST_TO_X", "false").lower() == "true"
+    if not live:
         print("DRY RUN: POST_TO_X is not true")
 
     client = Client("en-US")
@@ -221,6 +229,9 @@ async def main():
     sources = collect_sources()
     source = choose_source(sources, history)
     print(f"SELECTED SOURCE: {source['source']} — {source['title']}")
+    print(f"GEMINI KEYS AVAILABLE: {len(gemini_keys())}")
+    if live and len(gemini_keys()) < 2:
+        print("WARNING: GEMINI_API_KEY_BACKUP is not configured; only the primary key is available.")
 
     last = None
     for attempt in range(1, 5):
@@ -228,7 +239,7 @@ async def main():
             result = make_post(source, history)
             post = validate(result.get("post"), source, history)
             print(json.dumps({"attempt": attempt, "post": post, "reason": result.get("reason", "")}, ensure_ascii=False, indent=2))
-            if os.getenv("POST_TO_X", "false").lower() != "true":
+            if not live:
                 return
             tweet = await client.create_tweet(text=post)
             tweet_id = getattr(tweet, "id", None) or getattr(tweet, "id_str", "unknown")
