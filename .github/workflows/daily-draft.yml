@@ -7,15 +7,11 @@ on:
     paths-ignore:
       - post_history.json
       - slot_state.json
-  # GitHub Actions schedules are expressed in UTC here deliberately.
-  # 08:00 IST = 02:30 UTC; 16:00 IST = 10:30 UTC.
-  # We check every 5 minutes for one hour so a delayed scheduler event
-  # can still catch the intended publishing slot.
+  # 09:00-21:00 IST is 03:30-15:30 UTC.
+  # Run every 15 minutes, offset by 5 minutes to reduce top-of-hour congestion.
   schedule:
-    - cron: '30-59/5 2 * * *'
-    - cron: '0-25/5 3 * * *'
-    - cron: '30-59/5 10 * * *'
-    - cron: '0-25/5 11 * * *'
+    - cron: '5,20,35,50 3-14 * * *'
+    - cron: '5,20,35,50 15 * * *'
 
 concurrency:
   group: ai-x-publisher
@@ -41,14 +37,13 @@ jobs:
         shell: bash
         run: |
           hour="$(date +%H)"
+          minute="$(date +%M)"
           today="$(date +%Y-%m-%d)"
+          slot_minute=$((10#$minute / 15 * 15))
+          slot=$(printf '%s-%02d-%02d' "$today" "$hour" "$slot_minute")
 
-          if [[ "$hour" == "08" ]]; then
-            slot="${today}-08"
-          elif [[ "$hour" == "16" ]]; then
-            slot="${today}-16"
-          else
-            echo "Outside publishing windows: $(date)"
+          if (( 10#$hour < 9 || 10#$hour > 20 )); then
+            echo "Outside 09:00-20:59 IST publishing window: $(date)"
             exit 0
           fi
 
@@ -87,16 +82,17 @@ jobs:
       - name: Run publisher
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_BACKUP: ${{ secrets.GEMINI_API_KEY_BACKUP }}
           X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
           X_CT0: ${{ secrets.X_CT0 }}
         shell: bash
         run: |
-          # Scheduled runs are LIVE. Push/manual runs are deliberately DRY RUN.
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             export POST_TO_X=true
             echo "Trigger: schedule"
             echo "MODE: LIVE scheduled publish"
             echo "POST_TO_X=$POST_TO_X"
+            echo "PUBLISH_SLOT=$PUBLISH_SLOT"
           else
             export POST_TO_X=false
             echo "Trigger: ${{ github.event_name }}"
@@ -107,7 +103,7 @@ jobs:
           success=0
           for attempt in 1 2 3; do
             echo "Publisher attempt $attempt/3"
-            if python publisher_v2.py; then
+            if python publisher_v3.py; then
               success=1
               break
             fi
@@ -156,5 +152,7 @@ jobs:
       - name: Schedule confirmation
         if: always()
         run: |
-          echo "Publishing windows: 08:00-08:55 IST and 16:00-16:55 IST"
-          echo "Only scheduled runs can publish to X."
+          echo "Publishing window: 09:00-21:00 IST"
+          echo "Cadence: every 15 minutes"
+          echo "Scheduled runs are LIVE; push/manual runs are DRY RUN."
+          echo "Gemini primary + optional backup key are configured."
